@@ -5,12 +5,13 @@ import re
 import pandas as pd
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth  # Importação direta e obrigatória
+# MUDANÇA AQUI: Importamos a função específica para evitar o erro de 'module'
+from playwright_stealth import stealth 
 
-# --- CONFIGURAÇÃO DE AMBIENTE ---
+# --- AMBIENTE ---
 def preparar_navegador():
     if 'navegador_pronto' not in st.session_state:
-        with st.spinner("Instalando Chromium e dependências..."):
+        with st.spinner("Configurando Chromium..."):
             os.system("playwright install chromium")
             st.session_state.navegador_pronto = True
 
@@ -23,7 +24,7 @@ def gerar_periodos(data_ini, data_fim):
         atual = proximo
     return periodos
 
-# --- SCRAPER (BUSCA POR NOME) ---
+# --- SCRAPER ---
 async def extrair_dados(page, hotel_nome, checkin, checkout):
     query = hotel_nome.replace(" ", "+")
     url_busca = f"https://www.booking.com/searchresults.pt-br.html?ss={query}&checkin={checkin}&checkout={checkout}&selected_currency=USD"
@@ -32,10 +33,10 @@ async def extrair_dados(page, hotel_nome, checkin, checkout):
         await page.goto(url_busca, timeout=60000, wait_until="domcontentloaded")
         await page.wait_for_timeout(3000)
 
-        primeiro_resultado = await page.query_selector("div[data-testid='property-card']")
-        if primeiro_resultado:
+        primeiro_hotel = await page.query_selector("div[data-testid='property-card']")
+        if primeiro_hotel:
             async with page.expect_popup() as popup_info:
-                await primeiro_resultado.query_selector("a[data-testid='title-link']").click()
+                await primeiro_hotel.query_selector("a[data-testid='title-link']").click()
             hotel_page = await popup_info.value
             await hotel_page.wait_for_load_state("domcontentloaded")
             
@@ -73,32 +74,30 @@ async def extrair_dados(page, hotel_nome, checkin, checkout):
         return []
 
 # --- INTERFACE ---
-st.set_page_config(page_title="Booking Automation", layout="wide")
+st.set_page_config(page_title="Booking Search Tool", layout="wide")
 st.title("🏨 Automação de Pesquisa Booking")
 
-if "hoteis" not in st.session_state:
-    st.session_state.hoteis = []
+if "fila" not in st.session_state:
+    st.session_state.fila = []
 
 with st.sidebar:
-    st.header("Configurações")
-    nome_input = st.text_input("Nome do Hotel", placeholder="Ex: Hyatt Regency Lisbon")
+    st.header("Pesquisar Hotel")
+    nome_hotel = st.text_input("Nome do Hotel", placeholder="Ex: Hyatt Regency Lisbon")
     c1, c2 = st.columns(2)
     d_ini = c1.date_input("Início", datetime(2025, 12, 27))
     d_fim = c2.date_input("Fim", datetime(2025, 12, 30))
 
-    if st.button("➕ Adicionar à Fila"):
-        if nome_input:
-            st.session_state.hoteis.append({"nome": nome_input, "ini": d_ini, "fim": d_fim})
+    if st.button("➕ Adicionar"):
+        if nome_hotel:
+            st.session_state.fila.append({"nome": nome_hotel, "ini": d_ini, "fim": d_fim})
             st.rerun()
 
-    if st.button("🗑️ Limpar Lista"):
-        st.session_state.hoteis = []
+    if st.button("🗑️ Limpar"):
+        st.session_state.fila = []
         st.rerun()
 
-# --- EXECUÇÃO ---
-if st.session_state.hoteis:
-    st.write("### 📋 Hotéis na Fila")
-    st.table(pd.DataFrame(st.session_state.hoteis))
+if st.session_state.fila:
+    st.table(pd.DataFrame(st.session_state.fila))
 
     if st.button("🚀 INICIAR PESQUISA"):
         preparar_navegador()
@@ -106,32 +105,23 @@ if st.session_state.hoteis:
         async def main():
             resultados = []
             async with async_playwright() as p:
-                # Flags de compatibilidade para evitar erros de launch
-                browser = await p.chromium.launch(
-                    headless=True, 
-                    args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"]
-                )
+                browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
                 context = await browser.new_context()
                 page = await context.new_page()
                 
-                # CORREÇÃO DEFINITIVA DO ERRO 'module' object is not callable
+                # CHAMADA CORRIGIDA: Agora passamos 'page' para a função 'stealth'
                 await stealth(page) 
 
-                barra = st.progress(0)
-                status = st.empty()
-                
-                for i, h in enumerate(st.session_state.hoteis):
+                progresso = st.progress(0)
+                for i, h in enumerate(st.session_state.fila):
                     periodos = gerar_periodos(h["ini"], h["fim"])
                     for checkin, checkout in periodos:
-                        status.info(f"🔎 Pesquisando: {h['nome']} | {checkin}")
                         data = await extrair_dados(page, h['nome'], checkin, checkout)
                         resultados.extend(data)
-                    progresso.progress((i + 1) / len(st.session_state.hoteis))
-
+                    progresso.progress((i + 1) / len(st.session_state.fila))
                 await browser.close()
             return resultados
 
-        # Gerenciamento de loop assíncrono seguro
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -139,12 +129,9 @@ if st.session_state.hoteis:
             loop.close()
 
             if final_data:
-                st.success("✅ Pesquisa Concluída!")
-                df = pd.DataFrame(final_data)
-                st.dataframe(df, use_container_width=True)
+                st.success("✅ Concluído!")
+                st.dataframe(pd.DataFrame(final_data), use_container_width=True)
             else:
                 st.warning("Nenhum dado encontrado.")
         except Exception as e:
-            st.error(f"Erro na execução: {e}")
-else:
-    st.info("Adicione um hotel na barra lateral.")
+            st.error(f"Erro: {e}")
