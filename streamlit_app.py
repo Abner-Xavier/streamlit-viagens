@@ -5,16 +5,15 @@ import re
 import pandas as pd
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth
+from playwright_stealth import stealth  # CORREÇÃO AQUI
 
-# --- 1. INSTALAÇÃO DO NAVEGADOR ---
+# --- CONFIGURAÇÃO DO AMBIENTE ---
 def preparar_navegador():
     if 'navegador_pronto' not in st.session_state:
-        with st.spinner("Configurando componentes do Chrome..."):
+        with st.spinner("Instalando Chromium no servidor..."):
             os.system("playwright install chromium")
             st.session_state.navegador_pronto = True
 
-# --- 2. GERAÇÃO DE PERNOITES (FOTO 2) ---
 def gerar_periodos(data_ini, data_fim):
     periodos = []
     atual = data_ini
@@ -24,50 +23,48 @@ def gerar_periodos(data_ini, data_fim):
         atual = proximo
     return periodos
 
-# --- 3. SCRAPER DO BOOKING (BUSCA POR NOME) ---
-async def extrair_precos_por_nome(page, hotel_nome, checkin, checkout):
-    # URL de busca que tenta localizar o hotel pelo nome digitado
-    search_query = hotel_nome.replace(" ", "+")
-    url = f"https://www.booking.com/searchresults.pt-br.html?ss={search_query}&checkin={checkin}&checkout={checkout}&group_adults=2&no_rooms=1&selected_currency=USD"
+# --- SCRAPER (BUSCA POR NOME) ---
+async def extrair_dados(page, hotel_nome, checkin, checkout):
+    # Pesquisa direta pelo nome
+    query = hotel_nome.replace(" ", "+")
+    url_busca = f"https://www.booking.com/searchresults.pt-br.html?ss={query}&checkin={checkin}&checkout={checkout}&group_adults=2&no_rooms=1&selected_currency=USD"
     
     try:
-        await page.goto(url, timeout=60000, wait_until="domcontentloaded")
+        await page.goto(url_busca, timeout=60000, wait_until="domcontentloaded")
         await page.wait_for_timeout(3000)
 
-        # Tenta encontrar o primeiro resultado de hotel na lista de busca
-        first_hotel = await page.query_selector("div[data-testid='property-card']")
-        if first_hotel:
-            # Clica no primeiro hotel encontrado para abrir a página de detalhes
+        # Clica no primeiro hotel da lista de resultados
+        primeiro_resultado = await page.query_selector("div[data-testid='property-card']")
+        if primeiro_resultado:
             async with page.expect_popup() as popup_info:
-                await first_hotel.query_selector("a[data-testid='title-link']").click()
+                await primeiro_resultado.query_selector("a[data-testid='title-link']").click()
             hotel_page = await popup_info.value
             await hotel_page.wait_for_load_state("domcontentloaded")
             
-            # Coleta os dados na página do hotel aberta
             rows = await hotel_page.query_selector_all("table.hprt-table tbody tr.hprt-table-row")
             dados_dia = []
-            quarto_nome, area = "Desconhecido", None
+            quarto, area = "Desconhecido", None
 
             for row in rows:
                 nome_el = await row.query_selector(".hprt-roomtype-link")
                 if nome_el:
-                    quarto_nome = (await nome_el.inner_text()).strip()
-                    texto = await row.inner_text()
-                    area_m = re.search(r"(\d+)\s*(?:m²|sq m)", texto)
-                    area = int(area_m.group(1)) if area_m else None
+                    quarto = (await nome_el.inner_text()).strip()
+                    txt = await row.inner_text()
+                    m2 = re.search(r"(\d+)\s*(?:m²|sq m)", txt)
+                    area = int(m2.group(1)) if m2 else None
 
                 preco_el = await row.query_selector("span[data-testid='price-and-discounted-price'], .bui-price-display__value")
                 if preco_el:
-                    txt_preco = await preco_el.inner_text()
-                    valor = re.search(r"[\d,.]+", txt_preco)
-                    if valor:
+                    valor_txt = await preco_el.inner_text()
+                    valor_num = re.search(r"[\d,.]+", valor_txt)
+                    if valor_num:
                         dados_dia.append({
                             "Hotel_Name": hotel_nome,
                             "Checkin": checkin,
                             "Checkout": checkout,
-                            "Room_Name": quarto_nome,
+                            "Room_Name": quarto,
                             "Area_m2": area,
-                            "Price_USD": float(valor.group().replace(",", "")),
+                            "Price_USD": float(valor_num.group().replace(",", "")),
                             "Qty_Available": 5
                         })
             await hotel_page.close()
@@ -76,74 +73,71 @@ async def extrair_precos_por_nome(page, hotel_nome, checkin, checkout):
     except:
         return []
 
-# --- 4. INTERFACE ---
-st.set_page_config(page_title="Booking Search", layout="wide")
+# --- INTERFACE ---
+st.set_page_config(page_title="Travel Scraper", layout="wide")
 st.title("🏨 Automação de Pesquisa Booking")
 
-# Inicializa lista vazia
-if "lista_hoteis" not in st.session_state:
-    st.session_state.lista_hoteis = []
+if "hoteis" not in st.session_state:
+    st.session_state.hoteis = []
 
 with st.sidebar:
     st.header("Configurações")
-    # Agora apenas o nome é necessário
-    nome_hotel = st.text_input("Nome do Hotel", placeholder="Ex: Hyatt Regency Lisbon")
-    
+    nome_input = st.text_input("Nome do Hotel", placeholder="Ex: Hyatt Regency Lisbon")
     c1, c2 = st.columns(2)
-    data_i = c1.date_input("Início", datetime(2025, 12, 27))
-    data_f = c2.date_input("Fim", datetime(2025, 12, 30))
+    d_ini = c1.date_input("Início", datetime(2025, 12, 27))
+    d_fim = c2.date_input("Fim", datetime(2025, 12, 30))
 
     if st.button("➕ Adicionar à Fila"):
-        if nome_hotel:
-            st.session_state.lista_hoteis.append({"nome": nome_hotel, "ini": data_i, "fim": data_f})
+        if nome_input:
+            st.session_state.hoteis.append({"nome": nome_input, "ini": d_ini, "fim": d_fim})
             st.rerun()
 
-    if st.button("🗑️ Limpar Tudo"):
-        st.session_state.lista_hoteis = []
+    if st.button("🗑️ Limpar"):
+        st.session_state.hoteis = []
         st.rerun()
 
-# --- 5. EXECUÇÃO ---
-if st.session_state.lista_hoteis:
-    st.write("### 📋 Hotéis na Fila")
-    st.table(pd.DataFrame(st.session_state.lista_hoteis))
+# --- EXECUÇÃO ---
+if st.session_state.hoteis:
+    st.write("### 📋 Hotéis para Pesquisa")
+    st.table(pd.DataFrame(st.session_state.hoteis))
 
     if st.button("🚀 INICIAR PESQUISA"):
         preparar_navegador()
 
-        async def rodar_automacao():
-            resultados_finais = []
+        async def main():
+            resultados = []
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
                 context = await browser.new_context()
                 page = await context.new_page()
-                await stealth(page)
+                await stealth(page) # CORREÇÃO AQUI
 
-                barra = st.progress(0)
+                progresso = st.progress(0)
                 status = st.empty()
                 
-                for idx, h in enumerate(st.session_state.lista_hoteis):
+                for i, h in enumerate(st.session_state.hoteis):
                     periodos = gerar_periodos(h["ini"], h["fim"])
-                    for c_in, c_out in periodos:
-                        status.info(f"🔎 Buscando no Booking: {h['nome']} | {c_in}")
-                        data = await extrair_precos_por_nome(page, h['nome'], c_in, c_out)
-                        resultados_finais.extend(data)
-                    barra.progress((idx + 1) / len(st.session_state.lista_hoteis))
+                    for checkin, checkout in periodos:
+                        status.info(f"🔎 Buscando: {h['nome']} | {checkin}")
+                        data = await extrair_dados(page, h['nome'], checkin, checkout)
+                        resultados.extend(data)
+                    progresso.progress((i + 1) / len(st.session_state.hoteis))
 
                 await browser.close()
-            return resultados_finais
+            return resultados
 
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            final_df_data = loop.run_until_complete(rodar_automacao())
+            final_data = loop.run_until_complete(main())
             loop.close()
 
-            if final_df_data:
-                st.success("✅ Pesquisa concluída!")
-                df = pd.DataFrame(final_df_data)
-                # Exibe a tabela conforme o exemplo
+            if final_data:
+                st.success("✅ Concluído!")
+                df = pd.DataFrame(final_data)
+                # Tabela final igual à Foto 2
                 st.dataframe(df, use_container_width=True)
             else:
-                st.warning("Não foi possível encontrar o hotel ou os preços. Tente ser mais específico no nome.")
+                st.warning("Nenhum dado encontrado. Tente ajustar o nome do hotel.")
         except Exception as e:
-            st.error(f"Erro na pesquisa: {e}")
+            st.error(f"Erro na execução: {e}")
