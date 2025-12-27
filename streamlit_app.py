@@ -6,7 +6,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
 # Importação específica para evitar o erro de 'module not callable'
-from playwright_stealth import stealth 
+from playwright import stealth 
 
 # --- CONFIGURAÇÃO DO NAVEGADOR ---
 def preparar_navegador():
