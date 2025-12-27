@@ -4,15 +4,23 @@ import re
 import pandas as pd
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
+
+
+# -------------------------------------------------
+# STEALTH MANUAL (ESTÁVEL – SEM BIBLIOTECA EXTERNA)
+# -------------------------------------------------
+async def aplicar_stealth(page):
+    await page.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+    """)
 
 
 # -------------------------------------------------
 # UTILIDADES
 # -------------------------------------------------
-
 def gerar_periodos(data_ini, data_fim):
-    """Gera períodos de 1 noite"""
     periodos = []
     atual = data_ini
     while atual < data_fim:
@@ -25,35 +33,32 @@ def gerar_periodos(data_ini, data_fim):
 
 
 # -------------------------------------------------
-# SCRAPER BOOKING
+# SCRAPER BOOKING (USD GARANTIDO)
 # -------------------------------------------------
-
 async def extrair_dados_booking(page, hotel_nome, checkin, checkout):
     query = hotel_nome.replace(" ", "+")
-    url_busca = (
-        f"https://www.booking.com/searchresults.pt-br.html"
+    url = (
+        "https://www.booking.com/searchresults.en-us.html"
         f"?ss={query}"
         f"&checkin={checkin}"
         f"&checkout={checkout}"
-        f"&group_adults=2"
-        f"&no_rooms=1"
-        f"&selected_currency=USD"
+        "&group_adults=2"
+        "&no_rooms=1"
+        "&selected_currency=USD"
     )
 
     try:
-        await page.goto(url_busca, timeout=60000, wait_until="domcontentloaded")
+        await page.goto(url, timeout=60000, wait_until="domcontentloaded")
         await page.wait_for_timeout(3000)
 
         card = await page.query_selector("div[data-testid='property-card']")
         if not card:
             return []
 
-        async with page.expect_popup() as popup_info:
-            await card.query_selector(
-                "a[data-testid='title-link']"
-            ).click()
+        async with page.expect_popup() as popup:
+            await card.query_selector("a[data-testid='title-link']").click()
 
-        hotel_page = await popup_info.value
+        hotel_page = await popup.value
         await hotel_page.wait_for_load_state("domcontentloaded")
         await hotel_page.wait_for_timeout(3000)
 
@@ -79,8 +84,12 @@ async def extrair_dados_booking(page, hotel_nome, checkin, checkout):
 
             if preco_el:
                 txt_preco = await preco_el.inner_text()
-                valor = re.search(r"[\d,.]+", txt_preco)
 
+                # GARANTE USD
+                if "$" not in txt_preco and "USD" not in txt_preco:
+                    continue
+
+                valor = re.search(r"[\d,.]+", txt_preco)
                 if valor:
                     resultados.append({
                         "Hotel_Name": hotel_nome,
@@ -89,6 +98,7 @@ async def extrair_dados_booking(page, hotel_nome, checkin, checkout):
                         "Room_Name": quarto_atual,
                         "Area_m2": area_atual,
                         "Price_USD": float(valor.group().replace(",", "")),
+                        "Currency": "USD",
                         "Qty_Available": 5
                     })
 
@@ -102,9 +112,8 @@ async def extrair_dados_booking(page, hotel_nome, checkin, checkout):
 # -------------------------------------------------
 # STREAMLIT UI
 # -------------------------------------------------
-
-st.set_page_config(page_title="Booking Search Tool", layout="wide")
-st.title("🏨 Automação de Pesquisa Booking")
+st.set_page_config(page_title="Booking USD Search", layout="wide")
+st.title("🏨 Pesquisa Booking – Valores em Dólar (USD)")
 
 if "hoteis_fila" not in st.session_state:
     st.session_state.hoteis_fila = []
@@ -112,22 +121,19 @@ if "hoteis_fila" not in st.session_state:
 with st.sidebar:
     st.header("Configurações")
 
-    nome_hotel = st.text_input(
-        "Nome do Hotel", placeholder="Ex: Hyatt Regency Lisbon"
-    )
+    nome_hotel = st.text_input("Nome do Hotel", "Hyatt Regency Lisbon")
 
     col1, col2 = st.columns(2)
     data_ini = col1.date_input("Data Início", datetime(2025, 12, 27))
     data_fim = col2.date_input("Data Fim", datetime(2025, 12, 30))
 
     if st.button("➕ Adicionar Hotel"):
-        if nome_hotel:
-            st.session_state.hoteis_fila.append({
-                "nome": nome_hotel,
-                "ini": data_ini,
-                "fim": data_fim
-            })
-            st.rerun()
+        st.session_state.hoteis_fila.append({
+            "nome": nome_hotel,
+            "ini": data_ini,
+            "fim": data_fim
+        })
+        st.rerun()
 
     if st.button("🗑️ Limpar Lista"):
         st.session_state.hoteis_fila = []
@@ -137,13 +143,9 @@ with st.sidebar:
 # -------------------------------------------------
 # EXECUÇÃO
 # -------------------------------------------------
-
 if st.session_state.hoteis_fila:
     st.subheader("📋 Hotéis na fila")
-    st.dataframe(
-        pd.DataFrame(st.session_state.hoteis_fila),
-        use_container_width=True
-    )
+    st.dataframe(pd.DataFrame(st.session_state.hoteis_fila), use_container_width=True)
 
     if st.button("🚀 INICIAR PESQUISA"):
 
@@ -162,30 +164,24 @@ if st.session_state.hoteis_fila:
                     ]
                 )
 
-                context = await browser.new_context()
-                page = await context.new_page()
+                context = await browser.new_context(
+                    locale="en-US",
+                    timezone_id="America/New_York"
+                )
 
-                await stealth_async(page)
+                page = await context.new_page()
+                await aplicar_stealth(page)
 
                 barra = st.progress(0)
                 status = st.empty()
-
                 total = len(st.session_state.hoteis_fila)
 
                 for idx, hotel in enumerate(st.session_state.hoteis_fila):
-                    periodos = gerar_periodos(
-                        hotel["ini"], hotel["fim"]
-                    )
-
+                    periodos = gerar_periodos(hotel["ini"], hotel["fim"])
                     for checkin, checkout in periodos:
-                        status.info(
-                            f"🔎 {hotel['nome']} | {checkin}"
-                        )
+                        status.info(f"🔎 {hotel['nome']} | {checkin}")
                         dados = await extrair_dados_booking(
-                            page,
-                            hotel["nome"],
-                            checkin,
-                            checkout
+                            page, hotel["nome"], checkin, checkout
                         )
                         resultados.extend(dados)
 
@@ -205,12 +201,11 @@ if st.session_state.hoteis_fila:
             df = pd.DataFrame(dados_finais)
             st.dataframe(df, use_container_width=True)
             st.download_button(
-                "📥 Baixar CSV",
+                "📥 Baixar CSV (USD)",
                 df.to_csv(index=False),
-                "pesquisa_booking.csv"
+                "booking_usd.csv"
             )
         else:
             st.warning("Nenhum dado encontrado.")
-
 else:
-    st.info("Adicione hotéis na barra lateral para iniciar.")
+    st.info("Adicione hotéis para iniciar a pesquisa.")
