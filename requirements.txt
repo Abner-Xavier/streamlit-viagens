@@ -1,4 +1,4 @@
 streamlit
-playwright
-playwright-stealth
 pandas
+playwright==1.43.0
+playwright-stealth
