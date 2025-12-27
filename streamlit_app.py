@@ -7,139 +7,133 @@ from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
 from playwright_stealth import stealth
 
-# --- 1. INSTALAÇÃO DO NAVEGADOR ---
-def install_playwright_stuff():
-    if 'playwright_ready' not in st.session_state:
-        with st.spinner("Configurando ambiente do Chrome..."):
+# --- 1. INSTALAÇÃO AUTOMÁTICA DO NAVEGADOR ---
+def preparar_navegador():
+    if 'navegador_pronto' not in st.session_state:
+        with st.spinner("Configurando componentes do Chrome..."):
             os.system("playwright install chromium")
-            st.session_state.playwright_ready = True
+            st.session_state.navegador_pronto = True
 
-# --- 2. LÓGICA DE DATAS ---
-def gerar_periodos_pernoite(start_date, end_date):
+# --- 2. GERAÇÃO DE PERNOITES (FOTO 2) ---
+def gerar_periodos(data_ini, data_fim):
     periodos = []
-    atual = start_date
-    while atual < end_date:
+    atual = data_ini
+    while atual < data_fim:
         proximo = atual + timedelta(days=1)
         periodos.append((atual.strftime("%Y-%m-%d"), proximo.strftime("%Y-%m-%d")))
         atual = proximo
     return periodos
 
-async def coletar_dados_booking(page, hotel_name, url_base, checkin, checkout):
-    # Limpa a URL caso ela venha com parâmetros de busca antigos
-    url_limpa = url_base.split('?')[0]
-    url = f"{url_limpa}?checkin={checkin}&checkout={checkout}&group_adults=2&no_rooms=1&selected_currency=USD&lang=en-us"
+# --- 3. SCRAPER DO BOOKING ---
+async def extrair_precos(page, hotel_nome, url_origem, checkin, checkout):
+    # Limpa a URL de parâmetros antigos para evitar erros
+    url_base = url_origem.split('?')[0]
+    url = f"{url_base}?checkin={checkin}&checkout={checkout}&group_adults=2&no_rooms=1&selected_currency=USD&lang=en-us"
     
     try:
         await page.goto(url, timeout=60000, wait_until="domcontentloaded")
         await page.wait_for_timeout(2500)
 
         rows = await page.query_selector_all("table.hprt-table tbody tr.hprt-table-row")
-        resultados = []
-        quarto, area = "Desconhecido", None
+        dados_dia = []
+        quarto_nome, area = "Desconhecido", None
 
         for row in rows:
             nome_el = await row.query_selector(".hprt-roomtype-link")
             if nome_el:
-                quarto = (await nome_el.inner_text()).strip()
+                quarto_nome = (await nome_el.inner_text()).strip()
                 texto = await row.inner_text()
-                area_match = re.search(r"(\d+)\s*(?:m²|sq m)", texto)
-                area = int(area_match.group(1)) if area_match else None
+                area_m = re.search(r"(\d+)\s*(?:m²|sq m)", texto)
+                area = int(area_m.group(1)) if area_m else None
 
-            preco_el = await row.query_selector("span[data-testid='price-and-discounted-price'], .bui-price-display__value, .prco-valign-middle-helper")
+            preco_el = await row.query_selector("span[data-testid='price-and-discounted-price'], .bui-price-display__value")
             if preco_el:
-                preco_raw = await preco_el.inner_text()
-                preco_num = re.search(r"[\d,.]+", preco_raw)
-                if preco_num:
-                    resultados.append({
-                        "Hotel_Name": hotel_name,
+                txt_preco = await preco_el.inner_text()
+                valor = re.search(r"[\d,.]+", txt_preco)
+                if valor:
+                    dados_dia.append({
+                        "Hotel_Name": hotel_nome,
                         "Checkin": checkin,
                         "Checkout": checkout,
-                        "Room_Name": quarto,
+                        "Room_Name": quarto_nome,
                         "Area_m2": area,
-                        "Price_USD": float(preco_num.group().replace(",", "")),
+                        "Price_USD": float(valor.group().replace(",", "")),
                         "Qty_Available": 5
                     })
-        return resultados
+        return dados_dia
     except:
         return []
 
-# --- 3. INTERFACE ---
-st.set_page_config(page_title="Viagens Automation", layout="wide")
+# --- 4. INTERFACE ---
+st.set_page_config(page_title="Booking Search", layout="wide")
 st.title("🏨 Automação de Pesquisa Booking")
 
-# INICIALIZA A LISTA VAZIA (Remove os hotéis padrão)
-if "hoteis_lista" not in st.session_state:
-    st.session_state.hoteis_lista = []
+# Inicializa lista vazia (conforme solicitado)
+if "lista_hoteis" not in st.session_state:
+    st.session_state.lista_hoteis = []
 
 with st.sidebar:
     st.header("Configurações")
-    # Deixamos os campos vazios para você preencher
-    h_nome = st.text_input("Nome do Hotel", placeholder="Ex: Hyatt Regency Lisbon")
-    h_url = st.text_input("URL do Booking", placeholder="Cole o link do hotel aqui")
+    nome = st.text_input("Nome do Hotel", placeholder="Ex: Hyatt Regency Lisbon")
+    link = st.text_input("URL do Booking", placeholder="Cole o link do hotel aqui")
     
-    col1, col2 = st.columns(2)
-    with col1:
-        d_ini = st.date_input("Início", datetime.now() + timedelta(days=30))
-    with col2:
-        d_fim = st.date_input("Fim", datetime.now() + timedelta(days=33))
+    c1, c2 = st.columns(2)
+    data_i = c1.date_input("Início", datetime(2025, 12, 27))
+    data_f = c2.date_input("Fim", datetime(2025, 12, 30))
 
-    if st.button("➕ Adicionar à Lista"):
-        if h_nome and h_url:
-            st.session_state.hoteis_lista.append({
-                "nome": h_nome, 
-                "url": h_url, 
-                "ini": d_ini, 
-                "fim": d_fim
-            })
-            st.success(f"{h_nome} adicionado!")
-        else:
-            st.error("Preencha o nome e a URL.")
+    if st.button("➕ Adicionar à Fila"):
+        if nome and link:
+            st.session_state.lista_hoteis.append({"nome": nome, "url": link, "ini": data_i, "fim": data_f})
+            st.rerun()
 
-    if st.button("🗑️ Limpar Lista"):
-        st.session_state.hoteis_lista = []
+    if st.button("🗑️ Limpar Tudo"):
+        st.session_state.lista_hoteis = []
         st.rerun()
 
-# EXIBIÇÃO DA FILA
-if st.session_state.hoteis_lista:
-    st.write("### Hotéis na Fila")
-    st.table(pd.DataFrame(st.session_state.hoteis_lista))
+# --- 5. EXECUÇÃO ---
+if st.session_state.lista_hoteis:
+    st.write("### 📋 Hotéis na Fila")
+    st.dataframe(pd.DataFrame(st.session_state.lista_hoteis), use_container_width=True)
 
-    if st.button("🚀 INICIAR COLETA AGORA"):
-        install_playwright_stuff()
+    if st.button("🚀 INICIAR PESQUISA"):
+        preparar_navegador()
 
-        async def main_async():
-            todos_resultados = []
+        async def rodar_automacao():
+            resultados_finais = []
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+                browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
                 page = await browser.new_page()
                 await stealth(page)
 
-                progresso = st.progress(0)
+                barra = st.progress(0)
                 status = st.empty()
                 
-                for i, hotel in enumerate(st.session_state.hoteis_lista):
-                    periodos = gerar_periodos_pernoite(hotel["ini"], hotel["fim"])
-                    for checkin, checkout in periodos:
-                        status.info(f"🔎 Pesquisando {hotel['nome']} | {checkin}")
-                        dados = await coletar_dados_booking(page, hotel["nome"], hotel["url"], checkin, checkout)
-                        todos_resultados.extend(dados)
-                    progresso.progress((i + 1) / len(st.session_state.hoteis_lista))
+                for idx, h in enumerate(st.session_state.lista_hoteis):
+                    periodos = gerar_periodos(h["ini"], h["fim"])
+                    for c_in, c_out in periodos:
+                        status.info(f"🔎 Coletando: {h['nome']} | {c_in}")
+                        data = await extrair_precos(page, h["nome"], h["url"], c_in, c_out)
+                        resultados_finais.extend(data)
+                    barra.progress((idx + 1) / len(st.session_state.lista_hoteis))
 
                 await browser.close()
-            return todos_resultados
+            return resultados_finais
 
+        # Gerenciamento do loop para evitar erros de thread
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            resultado = loop.run_until_complete(main_async())
+            final_df_data = loop.run_until_complete(rodar_automacao())
             loop.close()
 
-            if resultado:
-                df = pd.DataFrame(resultado)
-                st.success("✅ Coleta Finalizada!")
+            if final_df_data:
+                st.success("✅ Pesquisa concluída!")
+                df = pd.DataFrame(final_df_data)
+                # Exibe a tabela formatada exatamente como na FOTO 2
                 st.dataframe(df, use_container_width=True)
-                st.download_button("📥 Baixar CSV", df.to_csv(index=False), "pesquisa_viagem.csv")
+            else:
+                st.warning("Nenhum preço encontrado. Verifique se o link está correto.")
         except Exception as e:
-            st.error(f"Erro: {e}")
+            st.error(f"Erro na pesquisa: {e}")
 else:
-    st.info("Adicione um hotel na barra lateral para começar.")
+    st.info("Utilize a barra lateral para adicionar hotéis.")
