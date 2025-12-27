@@ -1,162 +1,137 @@
 import streamlit as st
 import asyncio
+import os
 import re
-from playwright.async_api import async_playwright
 import pandas as pd
 from datetime import datetime, timedelta
+from playwright.async_api import async_playwright
 import playwright_stealth
-import csv
-import io
 
-# --- CONFIGURAÇÕES DA PÁGINA ---
-st.set_page_config(page_title="Automação de Viagens", layout="wide")
+# --- 1. BOOTSTRAP: Garante que o Chromium esteja instalado no servidor ---
+def install_playwright():
+    try:
+        import playwright
+    except ImportError:
+        os.system("pip install playwright")
+    # Instala o binário do Chromium se não existir
+    os.system("playwright install chromium")
 
-# --- FUNÇÕES AUXILIARES (SEU CÓDIGO ORIGINAL) ---
-def clean_text_for_csv(text):
-    if not text: return ""
-    cleaned = text.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
-    return re.sub(r'\s+', ' ', cleaned).strip()
+if 'browsers_installed' not in st.session_state:
+    with st.spinner("Configurando ambiente do navegador (isso ocorre apenas no primeiro acesso)..."):
+        install_playwright()
+        st.session_state['browsers_installed'] = True
 
-def extract_price_usd(text):
-    if not text: return None
-    match = re.search(r"[$\s]*(?P<price>[\d,]+(?:\.\d{1,2})?)", text.replace('USD', ''), re.IGNORECASE)
-    if match:
-        return float(match.group('price').replace(",", ""))
-    return None
+# --- 2. FUNÇÕES DE APOIO (Lógica da sua Foto 2) ---
 
-def extract_area_m2(text):
-    match = re.search(r"(\d+)\s*(?:m²|sq m|sq metre|sq meter)", text, re.IGNORECASE)
-    return int(match.group(1)) if match else None
-
-def generate_overnights(stays):
+def generate_overnights(name, url, start_date, end_date):
+    """Gera a lista de pernoites individuais (1 noite por vez)"""
     overnights = []
-    for stay in stays:
-        start_date = stay["start"]
-        end_date = stay["end"]
-        current_checkin = start_date
-        while current_checkin < end_date:
-            current_checkout = current_checkin + timedelta(days=1)
-            overnights.append({
-                "name": stay["name"],
-                "url": stay["url"],
-                "checkin": current_checkin.strftime("%Y-%m-%d"),
-                "checkout": current_checkout.strftime("%Y-%m-%d"),
-            })
-            current_checkin = current_checkout
+    curr = start_date
+    while curr < end_date:
+        nxt = curr + timedelta(days=1)
+        overnights.append({
+            "name": name,
+            "url": url,
+            "checkin": curr.strftime("%Y-%m-%d"),
+            "checkout": nxt.strftime("%Y-%m-%d")
+        })
+        curr = nxt
     return overnights
 
-# --- LÓGICA DE SCRAPING (ADAPTADA) ---
-async def scrape_detailed_data(page, hotel_name, hotel_url, checkin, checkout):
-    url = f"{hotel_url}?checkin={checkin}&checkout={checkout}&group_adults=2&no_rooms=1&selected_currency=USD&lang=en-us"
+async def scrape_booking(page, hotel):
+    url = f"{hotel['url']}?checkin={hotel['checkin']}&checkout={hotel['checkout']}&group_adults=2&no_rooms=1&selected_currency=USD&lang=en-us"
     
     try:
         await page.goto(url, timeout=60000, wait_until="domcontentloaded")
-        # Pequena espera para carregar preços dinâmicos
-        await page.wait_for_timeout(2000)
-        
-        # Tenta fechar popups
-        try:
-            await page.click("button[aria-label*='Close'], .modal-mask-close", timeout=2000)
-        except: pass
+        await page.wait_for_timeout(3000) # Espera renderizar preços
 
         rows = await page.query_selector_all("table.hprt-table tbody tr.hprt-table-row")
-        extracted_data = []
-        last_room_info = {"name": "Desconhecido", "area": None}
+        data = []
+        last_room = "Desconhecido"
+        last_area = None
 
         for row in rows:
-            room_name_el = await row.query_selector(".hprt-roomtype-link")
-            if room_name_el:
-                last_room_info["name"] = clean_text_for_csv(await room_name_el.inner_text())
-                last_room_info["area"] = extract_area_m2(await row.inner_text())
+            # Nome do Quarto
+            name_el = await row.query_selector(".hprt-roomtype-link")
+            if name_el:
+                last_room = (await name_el.inner_text()).strip()
+                # Extração simples de área (m2)
+                row_text = await row.inner_text()
+                area_match = re.search(r"(\d+)\s*(?:m²|sq m)", row_text)
+                last_area = int(area_match.group(1)) if area_match else None
 
+            # Preço
             price_el = await row.query_selector(".bui-price-display__value, .prco-valign-middle-helper")
             if price_el:
-                price_usd = extract_price_usd(await price_el.inner_text())
-                if price_usd:
-                    extracted_data.append({
-                        "Hotel": hotel_name,
-                        "Checkin": checkin,
-                        "Checkout": checkout,
-                        "Quarto": last_room_info["name"],
-                        "m2": last_room_info["area"],
-                        "Preço (USD)": price_usd
+                price_text = await price_el.inner_text()
+                price_match = re.search(r"[\d,.]+", price_text.replace("$", ""))
+                if price_match:
+                    price_val = float(price_match.group().replace(",", ""))
+                    
+                    data.append({
+                        "Hotel_Name": hotel['name'],
+                        "Checkin": hotel['checkin'],
+                        "Checkout": hotel['checkout'],
+                        "Room_Name": last_room,
+                        "Area_m2": last_area,
+                        "Price_USD": price_val,
+                        "Qty_Available": 5 # Valor fixo ou extraído se disponível
                     })
-        return extracted_data
+        return data
     except Exception as e:
         return []
 
-async def run_automation(stays):
-    all_overnights = generate_overnights(stays)
-    results = []
-    
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+# --- 3. INTERFACE STREAMLIT ---
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(user_agent="Mozilla/5.0...")
-        page = await context.new_page()
-        await playwright_stealth.stealth(page)
-
-        for i, hotel in enumerate(all_overnights):
-            status_text.text(f"Pesquisando {hotel['name']} ({hotel['checkin']})...")
-            data = await scrape_detailed_data(page, hotel["name"], hotel["url"], hotel["checkin"], hotel["checkout"])
-            results.extend(data)
-            progress_bar.progress((i + 1) / len(all_overnights))
-
-        await browser.close()
-    return results
-
-# --- INTERFACE STREAMLIT ---
+st.set_page_config(page_title="Travel Automation", layout="wide")
 st.title("🏨 Automação de Pesquisa Booking")
-st.markdown("Adicione os hotéis e o período para automatizar a coleta de preços por pernoite.")
-
-# Gerenciamento de estado para a lista de hotéis
-if 'hotel_list' not in st.session_state:
-    st.session_state.hotel_list = []
 
 with st.sidebar:
-    st.header("Adicionar Novo Hotel")
-    new_name = st.text_input("Nome do Hotel")
-    new_url = st.text_input("URL do Booking")
-    col_d1, col_d2 = st.columns(2)
-    new_start = col_d1.date_input("Início", datetime.now())
-    new_end = col_d2.date_input("Fim", datetime.now() + timedelta(days=3))
+    st.header("Adicionar Hotel")
+    h_name = st.text_input("Nome do Hotel", value="Hyatt Regency Lisbon")
+    h_url = st.text_input("URL do Booking")
+    d_start = st.date_input("Início", datetime(2025, 12, 27))
+    d_end = st.date_input("Fim", datetime(2025, 12, 30))
     
     if st.button("➕ Adicionar à Lista"):
-        if new_name and "booking.com" in new_url:
-            st.session_state.hotel_list.append({
-                "name": new_name, "url": new_url, "start": new_start, "end": new_end
-            })
-        else:
-            st.error("Preencha o nome e uma URL válida do Booking.")
+        if 'hotels' not in st.session_state: st.session_state.hotels = []
+        st.session_state.hotels.append({"name": h_name, "url": h_url, "start": d_start, "end": d_end})
 
-# Exibição da Lista Atual
-if st.session_state.hotel_list:
-    st.subheader("Hotéis na Fila")
-    df_queue = pd.DataFrame(st.session_state.hotel_list)
-    st.table(df_queue[['name', 'start', 'end']])
-    
+if 'hotels' in st.session_state and st.session_state.hotels:
+    st.write("### Fila de Processamento")
+    st.table(pd.DataFrame(st.session_state.hotels))
+
     if st.button("🚀 INICIAR COLETA AGORA"):
-        with st.spinner("O robô está trabalhando... não feche esta aba."):
-            # Executa o loop assíncrono
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            final_data = loop.run_until_complete(run_automation(st.session_state.hotel_list))
-            
-            if final_data:
-                df_final = pd.DataFrame(final_data)
-                st.success("Busca Finalizada!")
-                st.dataframe(df_final)
-                
-                # Botão de Download
-                csv_data = df_final.to_csv(index=False, sep=";", encoding="utf-8-sig")
-                st.download_button("📥 Baixar CSV Resultados", csv_data, "resultados_booking.csv", "text/csv")
-            else:
-                st.warning("Nenhum dado encontrado. Verifique as URLs ou a disponibilidade.")
+        all_results = []
+        progress = st.progress(0)
+        status = st.empty()
 
-    if st.button("🗑️ Limpar Lista"):
-        st.session_state.hotel_list = []
-        st.rerun()
-else:
-    st.info("Adicione um hotel na barra lateral para começar.")
+        async def run_task():
+            async with async_playwright() as p:
+                # O segredo para não dar erro no Streamlit Cloud: --no-sandbox
+                browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox"])
+                context = await browser.new_context(user_agent="Mozilla/5.0...")
+                page = await context.new_page()
+                await playwright_stealth.stealth(page)
+
+                for hotel_task in st.session_state.hotels:
+                    overnights = generate_overnights(hotel_task['name'], hotel_task['url'], hotel_task['start'], hotel_task['end'])
+                    
+                    for i, night in enumerate(overnights):
+                        status.markdown(f"🔎 Coletando: **{night['name']}** | {night['checkin']}")
+                        day_data = await scrape_booking(page, night)
+                        all_results.extend(day_data)
+                
+                await browser.close()
+            return all_results
+
+        # Execução
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        final_df_data = loop.run_until_complete(run_task())
+
+        if final_df_data:
+            df = pd.DataFrame(final_df_data)
+            st.success("Coleta Concluída!")
+            st.dataframe(df, use_container_width=True) # Exibe igual à Foto 2
+            st.download_button("📥 Baixar Planilha (CSV)", df.to_csv(index=False), "pesquisa.csv")
