@@ -5,16 +5,14 @@ import re
 import pandas as pd
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth
+from playwright_stealth import stealth  # Importação direta e obrigatória
 
 # --- CONFIGURAÇÃO DE AMBIENTE ---
 def preparar_navegador():
-    """Garante que o navegador está instalado no servidor"""
-    if 'navegador_ok' not in st.session_state:
-        with st.spinner("Finalizando configuração do sistema..."):
-            # Tenta instalar o chromium de forma silenciosa
+    if 'navegador_pronto' not in st.session_state:
+        with st.spinner("Instalando Chromium e dependências..."):
             os.system("playwright install chromium")
-            st.session_state.navegador_ok = True
+            st.session_state.navegador_pronto = True
 
 def gerar_periodos(data_ini, data_fim):
     periodos = []
@@ -28,7 +26,6 @@ def gerar_periodos(data_ini, data_fim):
 # --- SCRAPER (BUSCA POR NOME) ---
 async def extrair_dados(page, hotel_nome, checkin, checkout):
     query = hotel_nome.replace(" ", "+")
-    # Forçamos USD na URL e buscamos por nome
     url_busca = f"https://www.booking.com/searchresults.pt-br.html?ss={query}&checkin={checkin}&checkout={checkout}&selected_currency=USD"
     
     try:
@@ -54,20 +51,19 @@ async def extrair_dados(page, hotel_nome, checkin, checkout):
                     m2 = re.search(r"(\d+)\s*(?:m²|sq m)", txt)
                     area = int(m2.group(1)) if m2 else None
 
-                preco_el = await row.query_selector("span[data-testid='price-and-discounted-price'], .bui-price-display__value, .prco-valign-middle-helper")
+                preco_el = await row.query_selector("span[data-testid='price-and-discounted-price'], .bui-price-display__value")
                 if preco_el:
                     valor_txt = await preco_el.inner_text()
                     valor_num = re.search(r"[\d,.]+", valor_txt)
                     if valor_num:
-                        # Convertemos para float para garantir que é um número e formatamos como $
-                        preco_limpo = float(valor_num.group().replace(",", ""))
+                        preco_final = float(valor_num.group().replace(",", ""))
                         dados_dia.append({
                             "Hotel_Name": hotel_nome,
                             "Checkin": checkin,
                             "Checkout": checkout,
                             "Room_Name": quarto,
                             "Area_m2": area,
-                            "Price_USD": f"$ {preco_limpo:.2f}",
+                            "Price_USD": f"$ {preco_final:.2f}",
                             "Qty_Available": 5
                         })
             await hotel_page.close()
@@ -77,49 +73,51 @@ async def extrair_dados(page, hotel_nome, checkin, checkout):
         return []
 
 # --- INTERFACE ---
-st.set_page_config(page_title="Booking Bot", layout="wide")
-st.title("🏨 Automação Booking (Busca por Nome)")
+st.set_page_config(page_title="Booking Automation", layout="wide")
+st.title("🏨 Automação de Pesquisa Booking")
 
 if "hoteis" not in st.session_state:
     st.session_state.hoteis = []
 
 with st.sidebar:
-    st.header("Pesquisar Hotel")
+    st.header("Configurações")
     nome_input = st.text_input("Nome do Hotel", placeholder="Ex: Hyatt Regency Lisbon")
     c1, c2 = st.columns(2)
     d_ini = c1.date_input("Início", datetime(2025, 12, 27))
     d_fim = c2.date_input("Fim", datetime(2025, 12, 30))
 
-    if st.button("➕ Adicionar"):
+    if st.button("➕ Adicionar à Fila"):
         if nome_input:
             st.session_state.hoteis.append({"nome": nome_input, "ini": d_ini, "fim": d_fim})
             st.rerun()
 
-    if st.button("🗑️ Limpar Tudo"):
+    if st.button("🗑️ Limpar Lista"):
         st.session_state.hoteis = []
         st.rerun()
 
 # --- EXECUÇÃO ---
 if st.session_state.hoteis:
-    st.write("### 📋 Fila de Espera")
+    st.write("### 📋 Hotéis na Fila")
     st.table(pd.DataFrame(st.session_state.hoteis))
 
-    if st.button("🚀 INICIAR PESQUISA AGORA"):
+    if st.button("🚀 INICIAR PESQUISA"):
         preparar_navegador()
 
         async def main():
             resultados = []
             async with async_playwright() as p:
-                # Launch com flags essenciais para rodar no Docker/Cloud
+                # Flags de compatibilidade para evitar erros de launch
                 browser = await p.chromium.launch(
                     headless=True, 
-                    args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--single-process"]
+                    args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"]
                 )
                 context = await browser.new_context()
                 page = await context.new_page()
-                await stealth(page)
+                
+                # CORREÇÃO DEFINITIVA DO ERRO 'module' object is not callable
+                await stealth(page) 
 
-                progresso = st.progress(0)
+                barra = st.progress(0)
                 status = st.empty()
                 
                 for i, h in enumerate(st.session_state.hoteis):
@@ -133,21 +131,20 @@ if st.session_state.hoteis:
                 await browser.close()
             return resultados
 
+        # Gerenciamento de loop assíncrono seguro
         try:
-            # Gerenciamento de loop seguro para Streamlit
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             final_data = loop.run_until_complete(main())
             loop.close()
 
             if final_data:
-                st.success("✅ Concluído!")
+                st.success("✅ Pesquisa Concluída!")
                 df = pd.DataFrame(final_data)
                 st.dataframe(df, use_container_width=True)
             else:
-                st.warning("Nenhum dado encontrado. Verifique se o nome do hotel está correto.")
+                st.warning("Nenhum dado encontrado.")
         except Exception as e:
-            st.error(f"Erro Crítico: {e}")
-            st.info("Dica: Se o erro persistir, verifique se o arquivo packages.txt está no seu GitHub.")
+            st.error(f"Erro na execução: {e}")
 else:
-    st.info("Adicione o nome de um hotel na barra lateral.")
+    st.info("Adicione um hotel na barra lateral.")
