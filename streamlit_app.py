@@ -1,28 +1,23 @@
 import streamlit as st
-import asyncio
 from datetime import date
-from playwright.async_api import async_playwright
+from playwright.sync_api import sync_playwright
 
 
 st.set_page_config(page_title="Busca de Hotéis (USD)", layout="centered")
-
 st.title("🏨 Busca automática de hotéis (USD)")
-st.write("Digite apenas o nome do hotel. A busca é automática no Booking.com (EUA).")
+st.write("Digite o nome do hotel. Busca direta no Booking.com (USD).")
 
 
-# -----------------------------
-# FUNÇÃO ASYNC DE SCRAPING
-# -----------------------------
-async def buscar_hotel(hotel, checkin, checkout):
+def buscar_hotel(hotel, checkin, checkout):
     resultados = []
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage"]
         )
 
-        context = await browser.new_context(
+        context = browser.new_context(
             locale="en-US",
             timezone_id="America/New_York",
             user_agent=(
@@ -32,61 +27,56 @@ async def buscar_hotel(hotel, checkin, checkout):
             )
         )
 
-        page = await context.new_page()
+        page = context.new_page()
 
         url = (
             "https://www.booking.com/searchresults.html"
-            f"?ss={hotel}"
+            f"?ss={hotel.replace(' ', '+')}"
             f"&checkin={checkin}"
             f"&checkout={checkout}"
+            "&group_adults=2"
+            "&no_rooms=1"
             "&selected_currency=USD"
+            "&lang=en-us"
         )
 
-        await page.goto(url, timeout=60000)
-        await page.wait_for_timeout(6000)
+        page.goto(url, timeout=60000)
+        page.wait_for_timeout(6000)
 
-        cards = await page.query_selector_all('[data-testid="property-card"]')
+        cards = page.query_selector_all('[data-testid="property-card"]')
 
         for card in cards[:5]:
-            nome_el = await card.query_selector('[data-testid="title"]')
-            preco_el = await card.query_selector('[data-testid="price-and-discounted-price"]')
+            nome_el = card.query_selector('[data-testid="title"]')
+            preco_el = card.query_selector('[data-testid="price-and-discounted-price"]')
 
-            nome = await nome_el.inner_text() if nome_el else "N/A"
-            preco = await preco_el.inner_text() if preco_el else "N/A"
+            nome = nome_el.inner_text().strip() if nome_el else "N/A"
+            preco = preco_el.inner_text().strip() if preco_el else "N/A"
 
             resultados.append({
-                "Hotel": nome.strip(),
-                "Preço (USD)": preco.strip()
+                "Hotel": nome,
+                "Preço (USD)": preco
             })
 
-        await browser.close()
+        browser.close()
 
     return resultados
 
 
-# -----------------------------
-# INTERFACE STREAMLIT
-# -----------------------------
 hotel = st.text_input("Nome do hotel", placeholder="Ex: Hilton New York Times Square")
-
 checkin = st.date_input("Check-in", min_value=date.today())
 checkout = st.date_input("Check-out", min_value=date.today())
 
-buscar = st.button("🔍 Buscar preços")
-
-if buscar:
+if st.button("🔍 Buscar preços"):
     if not hotel:
         st.error("Digite o nome do hotel.")
     elif checkin >= checkout:
-        st.error("A data de check-out deve ser depois do check-in.")
+        st.error("Check-out deve ser depois do check-in.")
     else:
         with st.spinner("Buscando hotéis..."):
-            resultado = asyncio.run(
-                buscar_hotel(
-                    hotel,
-                    checkin.strftime("%Y-%m-%d"),
-                    checkout.strftime("%Y-%m-%d")
-                )
+            resultado = buscar_hotel(
+                hotel,
+                checkin.strftime("%Y-%m-%d"),
+                checkout.strftime("%Y-%m-%d")
             )
 
         if resultado:
