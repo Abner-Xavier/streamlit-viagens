@@ -4,11 +4,10 @@ import re
 import pandas as pd
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
 
-# -------------------------------
+# --------------------------------------------------
 # CONFIG STREAMLIT
-# -------------------------------
+# --------------------------------------------------
 st.set_page_config(
     page_title="Booking Search Bot",
     layout="wide"
@@ -16,9 +15,9 @@ st.set_page_config(
 
 st.title("🏨 Automação Booking — Pesquisa por Nome")
 
-# -------------------------------
+# --------------------------------------------------
 # FUNÇÕES AUXILIARES
-# -------------------------------
+# --------------------------------------------------
 def gerar_pernoites(data_ini, data_fim):
     periodos = []
     atual = data_ini
@@ -50,8 +49,6 @@ async def coletar_dados(page, hotel_nome, checkin, checkout):
         href = await link.get_attribute("href")
 
         hotel_page = await page.context.new_page()
-        await stealth_async(hotel_page)
-
         await hotel_page.goto("https://www.booking.com" + href, timeout=60000)
         await hotel_page.wait_for_load_state("domcontentloaded")
         await hotel_page.wait_for_timeout(3000)
@@ -114,11 +111,6 @@ async def rodar_scrapers(hoteis):
         )
 
         context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
             locale="pt-BR",
             timezone_id="America/Sao_Paulo",
             viewport={"width": 1280, "height": 800}
@@ -129,10 +121,8 @@ async def rodar_scrapers(hoteis):
 
         for i, hotel in enumerate(hoteis):
             page = await context.new_page()
-            await stealth_async(page)
 
             periodos = gerar_pernoites(hotel["ini"], hotel["fim"])
-
             for c_in, c_out in periodos:
                 status.info(f"🔎 {hotel['nome']} | {c_in}")
                 dados = await coletar_dados(page, hotel["nome"], c_in, c_out)
@@ -146,16 +136,16 @@ async def rodar_scrapers(hoteis):
     return dados_finais
 
 
-# -------------------------------
+# --------------------------------------------------
 # SESSION STATE
-# -------------------------------
+# --------------------------------------------------
 if "fila_hoteis" not in st.session_state:
     st.session_state.fila_hoteis = []
 
 
-# -------------------------------
+# --------------------------------------------------
 # SIDEBAR
-# -------------------------------
+# --------------------------------------------------
 with st.sidebar:
     st.header("Configurações")
 
@@ -179,12 +169,15 @@ with st.sidebar:
         st.rerun()
 
 
-# -------------------------------
+# --------------------------------------------------
 # EXECUÇÃO
-# -------------------------------
+# --------------------------------------------------
 if st.session_state.fila_hoteis:
     st.subheader("📋 Hotéis na fila")
-    st.dataframe(pd.DataFrame(st.session_state.fila_hoteis), use_container_width=True)
+    st.dataframe(
+        pd.DataFrame(st.session_state.fila_hoteis),
+        use_container_width=True
+    )
 
     if st.button("🚀 INICIAR PESQUISA"):
         with st.spinner("Buscando dados no Booking..."):
@@ -196,6 +189,7 @@ if st.session_state.fila_hoteis:
             df = pd.DataFrame(resultado)
             st.success("✅ Pesquisa finalizada")
             st.dataframe(df, use_container_width=True)
+
             st.download_button(
                 "⬇️ Baixar CSV",
                 df.to_csv(index=False),
