@@ -9,3 +9,4 @@ libgbm1
 libasound2
 libxshmfence1
 libgtk-3-0
+chromium
