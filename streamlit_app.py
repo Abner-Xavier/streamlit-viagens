@@ -3,6 +3,7 @@ import asyncio
 from datetime import date
 from playwright.async_api import async_playwright
 import pandas as pd
+from urllib.parse import quote_plus
 
 # ==============================
 # Streamlit config
@@ -18,11 +19,23 @@ st.title("🏨 Booking Automation — USA | USD")
 # Sidebar UI
 # ==============================
 with st.sidebar:
-    st.header("Search settings (USA)")
+    st.header("Search settings")
+
+    mode = st.radio(
+        "Search mode",
+        ["Search by hotel name", "Use Booking hotel URL"]
+    )
 
     hotel_name = st.text_input(
         "Hotel name",
-        value="Hilton Sao Paulo Morumbi"
+        value="Hilton Sao Paulo Morumbi",
+        disabled=(mode == "Use Booking hotel URL")
+    )
+
+    hotel_url = st.text_input(
+        "Booking hotel URL",
+        placeholder="https://www.booking.com/hotel/...",
+        disabled=(mode == "Search by hotel name")
     )
 
     col1, col2 = st.columns(2)
@@ -42,9 +55,11 @@ if "hotels" not in st.session_state:
 
 if add:
     st.session_state.hotels.append({
-        "nome": hotel_name,
-        "ini": str(checkin),
-        "fim": str(checkout)
+        "mode": mode,
+        "name": hotel_name,
+        "url": hotel_url,
+        "checkin": str(checkin),
+        "checkout": str(checkout)
     })
 
 if clear:
@@ -56,22 +71,45 @@ if clear:
 st.subheader("📋 Hotels queued")
 
 if st.session_state.hotels:
-    df = pd.DataFrame(st.session_state.hotels)
-    st.dataframe(df, use_container_width=True)
+    st.dataframe(pd.DataFrame(st.session_state.hotels), use_container_width=True)
 else:
     st.info("No hotels added")
 
 # ==============================
-# Playwright scraper (ONE browser)
+# URL builder
 # ==============================
-async def buscar_varios_hoteis(hoteis):
-    resultados = []
+def build_booking_url(h):
+    if h["mode"] == "Use Booking hotel URL":
+        return (
+            f"{h['url']}?"
+            f"checkin={h['checkin']}&checkout={h['checkout']}"
+            "&group_adults=2&no_rooms=1"
+            "&selected_currency=USD&lang=en-us"
+        )
+    else:
+        return (
+            "https://www.booking.com/searchresults.html"
+            f"?ss={quote_plus(h['name'])}"
+            f"&checkin_year={h['checkin'][:4]}"
+            f"&checkin_month={h['checkin'][5:7]}"
+            f"&checkin_monthday={h['checkin'][8:10]}"
+            f"&checkout_year={h['checkout'][:4]}"
+            f"&checkout_month={h['checkout'][5:7]}"
+            f"&checkout_monthday={h['checkout'][8:10]}"
+            "&group_adults=2&group_children=0&no_rooms=1"
+            "&selected_currency=USD&lang=en-us"
+        )
+
+# ==============================
+# Playwright scraper (SAFE)
+# ==============================
+async def scrape_hotels(hotels):
+    results = []
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
             args=[
-                "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
                 "--disable-dev-shm-usage"
             ]
@@ -79,54 +117,31 @@ async def buscar_varios_hoteis(hoteis):
 
         context = await browser.new_context(
             locale="en-US",
-            timezone_id="America/New_York",
-            extra_http_headers={
-                "Accept-Language": "en-US,en;q=0.9"
-            }
+            timezone_id="America/New_York"
         )
 
         page = await context.new_page()
 
-        for h in hoteis:
-            hotel = h["nome"]
-            checkin = h["ini"]
-            checkout = h["fim"]
+        for h in hotels:
+            url = build_booking_url(h)
 
-            url = (
-                "https://www.booking.com/searchresults.html"
-                f"?ss={hotel.replace(' ', '+')}"
-                f"&checkin_year={checkin[:4]}"
-                f"&checkin_month={checkin[5:7]}"
-                f"&checkin_monthday={checkin[8:10]}"
-                f"&checkout_year={checkout[:4]}"
-                f"&checkout_month={checkout[5:7]}"
-                f"&checkout_monthday={checkout[8:10]}"
-                "&group_adults=2"
-                "&group_children=0"
-                "&no_rooms=1"
-                "&selected_currency=USD"
-                "&lang=en-us"
-            )
-
-            await page.goto(url, timeout=60000)
+            await page.goto(url, timeout=90000)
             await page.wait_for_timeout(5000)
 
-            total = await page.locator(
-                '[data-testid="property-card"]'
-            ).count()
+            cards = await page.locator('[data-testid="property-card"]').count()
 
-            resultados.append({
-                "hotel": hotel,
-                "checkin": checkin,
-                "checkout": checkout,
-                "found_results": total,
-                "currency": "USD",
-                "region": "USA"
+            results.append({
+                "Hotel": h["name"] if h["name"] else h["url"],
+                "Check-in": h["checkin"],
+                "Check-out": h["checkout"],
+                "Results found": cards,
+                "Currency": "USD",
+                "Region": "USA"
             })
 
         await browser.close()
 
-    return resultados
+    return results
 
 # ==============================
 # Async runner (Streamlit-safe)
@@ -139,20 +154,14 @@ def run_async(coro):
     return result
 
 # ==============================
-# Start search button
+# Start search
 # ==============================
 if st.button("🚀 START SEARCH"):
     if not st.session_state.hotels:
         st.warning("Add at least one hotel")
     else:
-        with st.spinner("Searching Booking.com (USA | USD)..."):
-            results = run_async(
-                buscar_varios_hoteis(st.session_state.hotels)
-            )
+        with st.spinner("Searching Booking.com..."):
+            results = run_async(scrape_hotels(st.session_state.hotels))
 
         st.success("Search completed")
-
-        st.dataframe(
-            pd.DataFrame(results),
-            use_container_width=True
-        )
+        st.dataframe(pd.DataFrame(results), use_container_width=True)
