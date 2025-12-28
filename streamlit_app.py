@@ -5,15 +5,34 @@ import os
 import pandas as pd
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth
+import playwright_stealth
+import csv
 
-# --- CONFIGURAÇÃO INICIAL ---
-def setup_playwright():
+# --- CONFIGURAÇÃO DE AMBIENTE ---
+def install_browsers():
     if not os.path.exists("/home/runner/.cache/ms-playwright"):
-        os.system("playwright install chromium")
+        with st.spinner("Configurando Agente no servidor..."):
+            os.system("playwright install chromium")
 
-# --- LÓGICA DE EXTRAÇÃO (BACK-END) ---
-async def extrair_suites_agente(url_base, checkin, checkout):
+# --- FUNÇÕES DE LIMPEZA (SUA LÓGICA PYCHARM) ---
+def clean_text(text):
+    if not text: return ""
+    return re.sub(r'\s+', ' ', text.replace('\n', ' ')).strip()
+
+def extract_usd(text):
+    if not text: return None
+    match = re.search(r"([\d,.]+)", text.replace('USD', ''))
+    if match:
+        try: return float(match.group(1).replace(",", ""))
+        except: return None
+    return None
+
+def extract_m2(text):
+    match = re.search(r"(\d+)\s*(?:m²|sq m)", text, re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+# --- AGENTE DE EXTRAÇÃO ---
+async def agent_scrape(url_base, checkin, checkout):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
         context = await browser.new_context(
@@ -21,98 +40,106 @@ async def extrair_suites_agente(url_base, checkin, checkout):
             viewport={"width": 1280, "height": 800}
         )
         page = await context.new_page()
-        await stealth(page)
+        
+        # Correção do Stealth para evitar erro de Import
+        try:
+            await playwright_stealth.stealth_async(page)
+        except AttributeError:
+            await playwright_stealth.stealth(page)
 
-        # Monta a URL (Baseada na sua lógica de pernoite)
-        url = f"{url_base}?checkin={checkin}&checkout={checkout}&selected_currency=USD&lang=en-us"
+        url = f"{url_base}?checkin={checkin}&checkout={checkout}&group_adults=2&no_rooms=1&selected_currency=USD&lang=en-us"
         
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            
-            # Fecha pop-ups que atrapalham a equipe
+            # Fecha pop-up Genius se aparecer
             try:
                 await page.click("button[aria-label*='Close'], button:has-text('Dismiss')", timeout=5000)
             except: pass
 
             await page.wait_for_selector(".hprt-roomtype-link", timeout=20000)
-            
             rows = await page.query_selector_all("table.hprt-table tbody tr.hprt-table-row")
-            dados_brutos = []
-            current_room = "Desconhecido"
-            current_area = 0
+            
+            extracted = []
+            last_room = "Desconhecido"
+            last_area = None
 
             for row in rows:
-                # Extrai Nome e Area (m2)
                 room_el = await row.query_selector(".hprt-roomtype-link")
                 if room_el:
-                    current_room = (await room_el.inner_text()).strip()
-                    full_text = await row.inner_text()
-                    match_area = re.search(r"(\d+)\s*(?:m²|sq m)", full_text)
-                    current_area = int(match_area.group(1)) if match_area else 0
+                    last_room = clean_text(await room_el.inner_text())
+                    last_area = extract_m2(await row.inner_text())
 
-                # Extrai Preço
-                price_el = await row.query_selector(".bui-price-display__value")
-                if price_el:
-                    price_text = await price_el.inner_text()
-                    price_match = re.search(r"([\d,.]+)", price_text.replace("USD", ""))
-                    price_val = float(price_match.group(1).replace(",", "")) if price_match else 0
-                    
-                    dados_brutos.append({
-                        "Tipo de Suite": current_room,
-                        "m2": current_area,
-                        "Preço USD": price_val
+                price_el = await row.query_selector(".bui-price-display__value, .prco-valign-middle-helper")
+                price = extract_usd(await price_el.inner_text()) if price_el else None
+
+                if price:
+                    extracted.append({
+                        "Suíte": last_room,
+                        "Área_m2": last_area,
+                        "Preço_USD": price,
+                        "Checkin": checkin
                     })
-
+            
             await browser.close()
-            return dados_brutos
+            return extracted
         except Exception as e:
             await browser.close()
             return []
 
-# --- INTERFACE PARA A EQUIPE (FRONT-END) ---
+# --- INTERFACE (FRONT-END) ---
+st.set_page_config(page_title="Agente de Suítes", layout="wide")
+st.title("🏨 Agente de Inventário de Suítes")
+st.subheader("Otimização de tempo para equipe de análise")
 
+with st.sidebar:
+    st.header("Configuração")
+    url_input = st.text_input("URL do Booking")
+    d_in = st.date_input("Check-in", datetime.now() + timedelta(days=7))
+    d_out = st.date_input("Check-out", d_in + timedelta(days=1))
+    
+    # Gerador de Pernoites
+    if st.button("Adicionar Período"):
+        st.session_state.target = {"url": url_input, "in": str(d_in), "out": str(d_out)}
 
-st.set_page_config(page_title="Agente de Inventário", layout="wide")
-st.title("🤖 Agente de Inventário de Suítes")
-st.info("Este agente automatiza a extração que leva 45 minutos. Insira os dados abaixo:")
-
-with st.container():
-    url_hotel = st.text_input("Cole aqui a URL do Hotel no Booking:")
-    c1, c2 = st.columns(2)
-    with c1:
-        checkin = st.date_input("Check-in", datetime.now() + timedelta(days=7))
-    with c2:
-        checkout = st.date_input("Check-out", checkin + timedelta(days=1))
-
-if st.button("🚀 Iniciar Mapeamento"):
-    if not url_hotel:
-        st.warning("Por favor, insira a URL.")
-    else:
-        setup_playwright()
-        with st.spinner("O Agente está lendo o site e contando as suítes..."):
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            resultados = loop.run_until_complete(extrair_suites_agente(url_hotel, str(checkin), str(checkout)))
+if 'target' in st.session_state:
+    st.write(f"🎯 **Destino:** {st.session_state.target['url']}")
+    
+    if st.button("🚀 INICIAR AGENTE"):
+        install_browsers()
+        status = st.empty()
+        
+        # Rodar o robô
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        with st.spinner("O agente está mapeando o inventário..."):
+            res = loop.run_until_complete(agent_scrape(
+                st.session_state.target['url'], 
+                st.session_state.target['in'], 
+                st.session_state.target['out']
+            ))
+        
+        if res:
+            df = pd.DataFrame(res)
             
-            if resultados:
-                df = pd.DataFrame(resultados)
-                
-                # --- OTIMIZAÇÃO PARA A EQUIPE (SUITE COUNT) ---
-                st.subheader("📊 Resumo de Inventário (Suite Count)")
-                resumo = df.groupby(['Tipo de Suite', 'm2']).agg({
-                    'Preço USD': 'mean',
-                    'Tipo de Suite': 'count'
-                }).rename(columns={'Tipo de Suite': 'Qtd Ofertas'}).reset_index()
-                
+            # --- RESUMO PARA ECONOMIZAR 45 MINUTOS ---
+            st.success("Mapeamento concluído!")
+            
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.write("### 📊 Suite Count & m²")
+                resumo = df.groupby(['Suíte', 'Área_m2']).size().reset_index(name='Quantidade')
                 st.table(resumo)
-                
-                st.subheader("📋 Lista Detalhada")
-                st.dataframe(df)
-                
-                csv = df.to_csv(index=False, sep=";").encode('utf-8-sig')
-                st.download_button("📥 Baixar Planilha para Relatório", csv, "inventario_hotel.csv", "text/csv")
-            else:
-                st.error("O agente não encontrou quartos. Verifique a URL ou se há disponibilidade nas datas.")
+            
+            with col_b:
+                st.write("### 💵 Médias de Preço")
+                media = df.groupby('Suíte')['Preço_USD'].mean().reset_index()
+                st.dataframe(media)
 
-st.sidebar.markdown("---")
-st.sidebar.write("💡 **Dica:** Enquanto o agente roda, você pode trabalhar em outras abas. Ele notificará quando terminar.")
+            st.write("### 📋 Tabela Completa")
+            st.dataframe(df)
+            
+            # Exportação
+            csv_data = df.to_csv(index=False, sep=";").encode('utf-8-sig')
+            st.download_button("📥 Baixar Planilha para Relatório", csv_data, "inventario.csv", "text/csv")
+        else:
+            st.error("Falha na extração. O site pode ter bloqueado ou não há vagas.")
