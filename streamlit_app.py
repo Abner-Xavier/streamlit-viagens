@@ -1,135 +1,94 @@
 import streamlit as st
 import asyncio
-import re
 import pandas as pd
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
 import os
 
-# --- GARANTIR QUE O NAVEGADOR ESTEJA INSTALADO ---
 def install_playwright_browsers():
-    # Verifica se o navegador já existe para não baixar toda vez
     if not os.path.exists("/home/adminuser/.cache/ms-playwright"):
         os.system("playwright install chromium")
 
-# --- FUNÇÃO DE COLETA (SELETORES ATUALIZADOS) ---
 async def coletar_dados(page, hotel_nome, checkin, checkout):
     resultados = []
     query = hotel_nome.replace(" ", "+")
-    
-    # URL com moeda em USD e idioma PT-BR
-    url = (
-        f"https://www.booking.com/searchresults.pt-br.html"
-        f"?ss={query}&checkin={checkin}&checkout={checkout}&selected_currency=USD"
-    )
+    url = f"https://www.booking.com/searchresults.pt-br.html?ss={query}&checkin={checkin}&checkout={checkout}&selected_currency=USD"
 
     try:
-        # Aumentamos o timeout para 60s devido à lentidão do servidor cloud
         await page.goto(url, wait_until="load", timeout=60000)
-        await asyncio.sleep(4) # Pausa para carregar preços dinâmicos
+        await asyncio.sleep(5) 
 
-        # Tentar fechar pop-up de login/cookies se aparecer
+        # --- LÓGICA PARA FECHAR O POP-UP DO GENIUS (Visto no seu print) ---
         try:
-            await page.click("button[aria-label='Ignorar informações de login']", timeout=3000)
-        except: pass
+            # Tenta clicar no botão de fechar (X) ou fora do modal
+            popup_close = page.locator('button[aria-label="Ignorar informações de login"]')
+            if await popup_close.is_visible():
+                await popup_close.click()
+                st.info("Pop-up Genius fechado.")
+        except:
+            pass
 
-        # Localizar o primeiro card de hotel
-        card = await page.wait_for_selector('[data-testid="property-card"]', timeout=15000)
+        # Localizar o hotel
+        card = await page.wait_for_selector('[data-testid="property-card"]', timeout=20000)
         
         if card:
-            # Pegar informações básicas do primeiro resultado
-            nome_encontrado = await card.locator('[data-testid="title"]').inner_text()
-            
-            # Tentar capturar o preço com seletores alternativos
+            nome = await card.locator('[data-testid="title"]').inner_text()
             try:
-                preco_txt = await card.locator('[data-testid="price-and-discounted-price"]').inner_text()
+                preco = await card.locator('[data-testid="price-and-discounted-price"]').inner_text()
             except:
-                preco_txt = "Preço não disponível"
+                preco = "Ver no site"
 
             resultados.append({
-                "Hotel Pesquisado": hotel_nome,
-                "Hotel Encontrado": nome_encontrado,
+                "Hotel": nome,
+                "Preço": preco,
                 "Check-in": checkin,
-                "Check-out": checkout,
-                "Preço": preco_txt
+                "Check-out": checkout
             })
         
         return resultados
 
     except Exception as e:
-        # Tira um print se algo der errado (ajuda a ver se houve bloqueio/Captcha)
-        await page.screenshot(path="erro_booking.png")
+        await page.screenshot(path="erro_debug.png")
         return resultados
 
 async def rodar_scrapers(hoteis):
-    dados_finais = []
     install_playwright_browsers()
-
+    dados_finais = []
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"]
-        )
-
+        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800}
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
-
-        progresso = st.progress(0.0)
-        status = st.empty()
-
-        for i, hotel in enumerate(hoteis):
+        
+        for hotel in hoteis:
             page = await context.new_page()
-            
-            # Gerar datas de pernoite (lógica que você já tinha)
-            d_ini = hotel["ini"]
-            d_fim = hotel["fim"]
-            
-            status.info(f"🔎 Pesquisando: {hotel['nome']}")
-            
-            # Chamada simplificada para o primeiro período
-            dados = await coletar_dados(page, hotel["nome"], d_ini.strftime("%Y-%m-%d"), d_fim.strftime("%Y-%m-%d"))
+            dados = await coletar_dados(page, hotel["nome"], hotel["ini"].strftime("%Y-%m-%d"), hotel["fim"].strftime("%Y-%m-%d"))
             dados_finais.extend(dados)
-
             await page.close()
-            progresso.progress((i + 1) / len(hoteis))
-
+            
         await browser.close()
     return dados_finais
 
-# --- INTERFACE STREAMLIT ---
-st.set_page_config(page_title="Booking Bot", layout="wide")
-st.title("🏨 Buscador Booking Corrigido")
-
-if "fila" not in st.session_state:
-    st.session_state.fila = []
+# --- INTERFACE ---
+st.title("🏨 Buscador Booking")
+if "fila" not in st.session_state: st.session_state.fila = []
 
 with st.sidebar:
-    st.header("Novo Hotel")
-    nome = st.text_input("Nome do Hotel")
+    nome = st.text_input("Hotel")
     c1, c2 = st.columns(2)
     ini = c1.date_input("Check-in", datetime.now() + timedelta(days=7))
-    fim = c2.date_input("Check-out", ini + timedelta(days=2))
-
+    fim = c2.date_input("Check-out", ini + timedelta(days=3))
     if st.button("Adicionar"):
         st.session_state.fila.append({"nome": nome, "ini": ini, "fim": fim})
-        st.rerun()
-
-    if st.button("Limpar Tudo"):
-        st.session_state.fila = []
-        st.rerun()
 
 if st.session_state.fila:
-    st.table(pd.DataFrame(st.session_state.fila))
+    st.write(st.session_state.fila)
     if st.button("🚀 INICIAR BUSCA"):
-        resultado = asyncio.run(rodar_scrapers(st.session_state.fila))
-        
-        if resultado:
-            df = pd.DataFrame(resultado)
-            st.success("Busca Finalizada!")
-            st.dataframe(df)
-        else:
-            st.error("Não foi possível extrair dados. Veja o print abaixo.")
-            if os.path.exists("erro_booking.png"):
-                st.image("erro_booking.png", caption="O que o robô viu (Possível Bloqueio)")
+        with st.spinner("Buscando..."):
+            res = asyncio.run(rodar_scrapers(st.session_state.fila))
+            if res:
+                st.dataframe(pd.DataFrame(res))
+            else:
+                st.error("Erro. Verifique o print de debug abaixo.")
+                if os.path.exists("erro_debug.png"):
+                    st.image("erro_debug.png")
