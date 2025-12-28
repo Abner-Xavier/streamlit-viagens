@@ -1,183 +1,110 @@
 import streamlit as st
 import asyncio
-import re
-import pandas as pd
-from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
 import os
+from datetime import datetime, timedelta
 
-# -------------------------------
-# INSTALAÇÃO AUTOMÁTICA (Necessário para o Cloud)
-# -------------------------------
-def install_playwright_browsers():
-    # Isso evita o erro "Executable doesn't exist"
-    if not os.path.exists("/home/adminuser/.cache/ms-playwright"):
-        os.system("playwright install chromium")
+# --- CONFIGURAÇÃO DE AMBIENTE ---
+def install_playwright():
+    st.info("Instalando navegadores... Isso pode levar 1-2 minutos.")
+    os.system("playwright install chromium")
 
-# -------------------------------
-# CONFIG STREAMLIT
-# -------------------------------
-st.set_page_config(
-    page_title="Booking Search Bot",
-    layout="wide"
-)
-
-st.title("🏨 Automação Booking — Pesquisa por Nome")
-
-# -------------------------------
-# FUNÇÕES AUXILIARES
-# -------------------------------
-def gerar_pernoites(data_ini, data_fim):
-    periodos = []
-    atual = data_ini
-    while atual < data_fim:
-        prox = atual + timedelta(days=1)
-        periodos.append((atual.strftime("%Y-%m-%d"), prox.strftime("%Y-%m-%d")))
-        atual = prox
-    return periodos
-
-async def coletar_dados(page, hotel_nome, checkin, checkout):
-    resultados = []
-
-    query = hotel_nome.replace(" ", "+")
-    # Adicionamos parâmetros para garantir que venha em USD e idioma correto
-    url = (
-        f"https://www.booking.com/searchresults.pt-br.html"
-        f"?ss={query}&checkin={checkin}&checkout={checkout}&selected_currency=USD"
-    )
-
-    try:
-        await page.goto(url, timeout=60000, wait_until="networkidle")
-        
-        # Localiza o primeiro card de hotel
-        card = await page.query_selector("div[data-testid='property-card']")
-        if not card:
-            return resultados
-
-        link = await card.query_selector("a[data-testid='title-link']")
-        href = await link.get_attribute("href")
-        
-        # Abre a página do hotel em uma nova aba
-        hotel_page = await page.context.new_page()
-        # REMOVIDO: stealth_async aqui
-
-        await hotel_page.goto("https://www.booking.com" + href, timeout=60000)
-        await hotel_page.wait_for_load_state("domcontentloaded")
-        await asyncio.sleep(2) # Pequena pausa para carregar preços dinâmicos
-
-        rows = await hotel_page.query_selector_all("table.hprt-table tbody tr.hprt-table-row")
-
-        quarto_atual = "Desconhecido"
-        area_atual = None
-
-        for row in rows:
-            nome_el = await row.query_selector(".hprt-roomtype-link")
-            if nome_el:
-                quarto_atual = (await nome_el.inner_text()).strip()
-                texto = await row.inner_text()
-                m2 = re.search(r"(\d+)\s*(?:m²|sq m)", texto)
-                area_atual = int(m2.group(1)) if m2 else None
-
-            preco_el = await row.query_selector(
-                "span[data-testid='price-and-discounted-price'], .bui-price-display__value, .prco-valign-middle-helper"
-            )
-
-            if preco_el:
-                preco_txt = await preco_el.inner_text()
-                match = re.search(r"[\d.,]+", preco_txt)
-
-                if match:
-                    valor = match.group().replace(".", "").replace(",", ".")
-                    preco = float(valor)
-
-                    resultados.append({
-                        "Hotel": hotel_nome,
-                        "Check-in": checkin,
-                        "Check-out": checkout,
-                        "Quarto": quarto_atual,
-                        "Área (m²)": area_atual,
-                        "Preço (USD)": round(preco, 2)
-                    })
-
-        await hotel_page.close()
-        return resultados
-
-    except Exception as e:
-        print(f"Erro na coleta: {e}")
-        return resultados
-
-async def rodar_scrapers(hoteis):
-    dados_finais = []
-    install_playwright_browsers()
-
+# --- FUNÇÃO DE BUSCA ---
+async def buscar_booking(hotel_nome, checkin, checkout):
     async with async_playwright() as p:
+        # Lançamos o navegador com argumentos para evitar detecção básica
         browser = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"]
+            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"]
         )
-
+        
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            locale="pt-BR",
             viewport={"width": 1280, "height": 800}
         )
+        page = await context.new_page()
 
-        progresso = st.progress(0.0)
-        status = st.empty()
+        # URL montada para busca direta
+        url = (
+            f"https://www.booking.com/searchresults.pt-br.html?"
+            f"ss={hotel_nome.replace(' ', '+')}&"
+            f"checkin={checkin}&"
+            f"checkout={checkout}&"
+            f"group_adults=2&no_rooms=1&group_children=0&selected_currency=BRL"
+        )
 
-        for i, hotel in enumerate(hoteis):
-            page = await context.new_page()
-            # REMOVIDO: stealth_async aqui
+        try:
+            await page.goto(url, wait_until="load", timeout=60000)
+            await asyncio.sleep(5) # Espera o carregamento dinâmico
 
-            periodos = gerar_pernoites(hotel["ini"], hotel["fim"])
+            # 1. Tentar fechar banner de cookies ou login se aparecer
+            try:
+                await page.click("button[aria-label='Ignorar informações de login']", timeout=3000)
+            except: pass
 
-            for c_in, c_out in periodos:
-                status.info(f"🔎 {hotel['nome']} | {c_in}")
-                dados = await coletar_dados(page, hotel["nome"], c_in, c_out)
-                dados_finais.extend(dados)
+            # 2. Tentar encontrar o card do hotel (usando múltiplos seletores)
+            # O Booking vive mudando esses nomes
+            seletores_card = [
+                '[data-testid="property-card"]', 
+                '.sr_property_block', 
+                '[data-block-id="hotel_list"]'
+            ]
+            
+            card_encontrado = None
+            for sel in seletores_card:
+                if await page.query_selector(sel):
+                    card_encontrado = page.locator(sel).first
+                    break
 
-            await page.close()
-            progresso.progress((i + 1) / len(hoteis))
+            if card_encontrado:
+                nome = await card_encontrado.locator('[data-testid="title"]').inner_text()
+                # Tenta pegar o preço (pode variar o seletor)
+                try:
+                    preco = await card_encontrado.locator('[data-testid="price-and-discounted-price"]').inner_text()
+                except:
+                    preco = "Preço sob consulta"
+                
+                return {"status": "sucesso", "hotel": nome, "preco": preco, "url": url}
+            
+            # Se não achar nada, tira print para debug
+            await page.screenshot(path="erro_debug.png")
+            return {"status": "erro", "mensagem": "Hotel não localizado. Veja o print abaixo.", "debug": True}
 
-        await browser.close()
-    return dados_finais
+        except Exception as e:
+            await page.screenshot(path="erro_debug.png")
+            return {"status": "erro", "mensagem": f"Erro técnico: {str(e)}", "debug": True}
+        finally:
+            await browser.close()
 
-# -------------------------------
-# SESSION STATE E UI
-# -------------------------------
-if "fila_hoteis" not in st.session_state:
-    st.session_state.fila_hoteis = []
+# --- INTERFACE ---
+def main():
+    st.set_page_config(page_title="Buscador Booking", page_icon="🏨")
+    st.title("🏨 Pesquisar Hotel no Booking")
 
-with st.sidebar:
-    st.header("Configurações")
-    nome = st.text_input("Nome do Hotel")
+    if st.sidebar.button("Configurar Navegador"):
+        install_playwright()
+
+    hotel_nome = st.text_input("Nome do Hotel:", "Hilton sao paulo Morumbi")
+    
     col1, col2 = st.columns(2)
-    d_ini = col1.date_input("Check-in", datetime.now() + timedelta(days=7))
-    d_fim = col2.date_input("Check-out", d_ini + timedelta(days=3))
+    with col1:
+        data_in = st.date_input("Check-in", datetime.now() + timedelta(days=10))
+    with col2:
+        data_out = st.date_input("Check-out", data_in + timedelta(days=2))
 
-    if st.button("➕ Adicionar Hotel"):
-        if nome:
-            st.session_state.fila_hoteis.append({"nome": nome, "ini": d_ini, "fim": d_fim})
-            st.rerun()
+    if st.button("Verificar Preço"):
+        with st.spinner("Consultando Booking..."):
+            res = asyncio.run(buscar_booking(hotel_nome, data_in.strftime("%Y-%m-%d"), data_out.strftime("%Y-%m-%d")))
+            
+            if res["status"] == "sucesso":
+                st.balloons()
+                st.success(f"**Hotel:** {res['hotel']}")
+                st.subheader(f"Valor: {res['preco']}")
+                st.link_button("Ir para o site", res["url"])
+            else:
+                st.error(res["mensagem"])
+                if "debug" in res and os.path.exists("erro_debug.png"):
+                    st.image("erro_debug.png", caption="O que o robô viu no momento do erro")
 
-    if st.button("🗑️ Limpar Lista"):
-        st.session_state.fila_hoteis = []
-        st.rerun()
-
-if st.session_state.fila_hoteis:
-    st.subheader("📋 Hotéis na fila")
-    st.dataframe(pd.DataFrame(st.session_state.fila_hoteis), use_container_width=True)
-
-    if st.button("🚀 INICIAR PESQUISA"):
-        with st.spinner("Buscando dados no Booking..."):
-            resultado = asyncio.run(rodar_scrapers(st.session_state.fila_hoteis))
-
-        if resultado:
-            df = pd.DataFrame(resultado)
-            st.success("✅ Pesquisa finalizada")
-            st.dataframe(df, use_container_width=True)
-            st.download_button("⬇️ Baixar CSV", df.to_csv(index=False), "booking.csv", "text/csv")
-        else:
-            st.warning("Nenhum dado encontrado. Verifique se o nome do hotel está correto.")
-else:
-    st.info("Adicione hotéis na barra lateral para iniciar.")
+if __name__ == "__main__":
+    main()
