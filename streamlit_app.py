@@ -9,11 +9,11 @@ from playwright.async_api import async_playwright
 # CONFIG STREAMLIT
 # --------------------------------------------------
 st.set_page_config(
-    page_title="Booking Search Bot",
+    page_title="Booking Search Bot (USA)",
     layout="wide"
 )
 
-st.title("🏨 Automação Booking — Pesquisa por Nome")
+st.title("🏨 Booking Automation — USA | USD")
 
 # --------------------------------------------------
 # FUNÇÕES AUXILIARES
@@ -23,7 +23,9 @@ def gerar_pernoites(data_ini, data_fim):
     atual = data_ini
     while atual < data_fim:
         prox = atual + timedelta(days=1)
-        periodos.append((atual.strftime("%Y-%m-%d"), prox.strftime("%Y-%m-%d")))
+        periodos.append(
+            (atual.strftime("%Y-%m-%d"), prox.strftime("%Y-%m-%d"))
+        )
         atual = prox
     return periodos
 
@@ -32,9 +34,17 @@ async def coletar_dados(page, hotel_nome, checkin, checkout):
     resultados = []
 
     query = hotel_nome.replace(" ", "+")
+
     url = (
-        f"https://www.booking.com/searchresults.pt-br.html"
-        f"?ss={query}&checkin={checkin}&checkout={checkout}&selected_currency=USD"
+        "https://www.booking.com/searchresults.en-us.html"
+        f"?ss={query}"
+        "&dest_type=country"
+        "&dest_id=20088325"
+        f"&checkin={checkin}"
+        f"&checkout={checkout}"
+        "&group_adults=2"
+        "&no_rooms=1"
+        "&selected_currency=USD"
     )
 
     try:
@@ -57,7 +67,7 @@ async def coletar_dados(page, hotel_nome, checkin, checkout):
             "table.hprt-table tbody tr.hprt-table-row"
         )
 
-        quarto_atual = "Desconhecido"
+        quarto_atual = "Unknown"
         area_atual = None
 
         for row in rows:
@@ -78,16 +88,16 @@ async def coletar_dados(page, hotel_nome, checkin, checkout):
 
                 if match:
                     valor = match.group()
-                    valor = valor.replace(".", "").replace(",", ".")
+                    valor = valor.replace(",", "")
                     preco = float(valor)
 
                     resultados.append({
                         "Hotel": hotel_nome,
                         "Check-in": checkin,
                         "Check-out": checkout,
-                        "Quarto": quarto_atual,
-                        "Área (m²)": area_atual,
-                        "Preço (USD)": round(preco, 2)
+                        "Room": quarto_atual,
+                        "Area_m2": area_atual,
+                        "Price_USD": round(preco, 2)
                     })
 
         await hotel_page.close()
@@ -111,8 +121,8 @@ async def rodar_scrapers(hoteis):
         )
 
         context = await browser.new_context(
-            locale="pt-BR",
-            timezone_id="America/Sao_Paulo",
+            locale="en-US",
+            timezone_id="America/New_York",
             viewport={"width": 1280, "height": 800}
         )
 
@@ -125,7 +135,9 @@ async def rodar_scrapers(hoteis):
             periodos = gerar_pernoites(hotel["ini"], hotel["fim"])
             for c_in, c_out in periodos:
                 status.info(f"🔎 {hotel['nome']} | {c_in}")
-                dados = await coletar_dados(page, hotel["nome"], c_in, c_out)
+                dados = await coletar_dados(
+                    page, hotel["nome"], c_in, c_out
+                )
                 dados_finais.extend(dados)
 
             await page.close()
@@ -147,15 +159,15 @@ if "fila_hoteis" not in st.session_state:
 # SIDEBAR
 # --------------------------------------------------
 with st.sidebar:
-    st.header("Configurações")
+    st.header("Search settings (USA)")
 
-    nome = st.text_input("Nome do Hotel")
+    nome = st.text_input("Hotel name")
     col1, col2 = st.columns(2)
 
     d_ini = col1.date_input("Check-in", datetime(2025, 12, 27))
     d_fim = col2.date_input("Check-out", datetime(2025, 12, 30))
 
-    if st.button("➕ Adicionar Hotel"):
+    if st.button("➕ Add hotel"):
         if nome:
             st.session_state.fila_hoteis.append({
                 "nome": nome,
@@ -164,7 +176,7 @@ with st.sidebar:
             })
             st.rerun()
 
-    if st.button("🗑️ Limpar Lista"):
+    if st.button("🗑️ Clear list"):
         st.session_state.fila_hoteis = []
         st.rerun()
 
@@ -173,30 +185,30 @@ with st.sidebar:
 # EXECUÇÃO
 # --------------------------------------------------
 if st.session_state.fila_hoteis:
-    st.subheader("📋 Hotéis na fila")
+    st.subheader("📋 Hotels queued")
     st.dataframe(
         pd.DataFrame(st.session_state.fila_hoteis),
         use_container_width=True
     )
 
-    if st.button("🚀 INICIAR PESQUISA"):
-        with st.spinner("Buscando dados no Booking..."):
+    if st.button("🚀 START SEARCH"):
+        with st.spinner("Searching Booking.com (USA, USD)..."):
             resultado = asyncio.run(
                 rodar_scrapers(st.session_state.fila_hoteis)
             )
 
         if resultado:
             df = pd.DataFrame(resultado)
-            st.success("✅ Pesquisa finalizada")
+            st.success("✅ Search completed")
             st.dataframe(df, use_container_width=True)
 
             st.download_button(
-                "⬇️ Baixar CSV",
+                "⬇️ Download CSV",
                 df.to_csv(index=False),
-                file_name="booking_resultados.csv",
+                file_name="booking_usa_usd.csv",
                 mime="text/csv"
             )
         else:
-            st.warning("Nenhum dado encontrado.")
+            st.warning("No data found.")
 else:
-    st.info("Adicione hotéis na barra lateral para iniciar.")
+    st.info("Add hotels in the sidebar to start.")
