@@ -4,6 +4,9 @@ from datetime import date
 from playwright.async_api import async_playwright
 import pandas as pd
 
+# ==============================
+# Streamlit config
+# ==============================
 st.set_page_config(
     page_title="Booking Automation — USA | USD",
     layout="wide"
@@ -12,7 +15,7 @@ st.set_page_config(
 st.title("🏨 Booking Automation — USA | USD")
 
 # ==============================
-# UI
+# Sidebar UI
 # ==============================
 with st.sidebar:
     st.header("Search settings (USA)")
@@ -31,6 +34,9 @@ with st.sidebar:
     add = st.button("➕ Add hotel")
     clear = st.button("🗑 Clear list")
 
+# ==============================
+# Session state
+# ==============================
 if "hotels" not in st.session_state:
     st.session_state.hotels = []
 
@@ -44,6 +50,9 @@ if add:
 if clear:
     st.session_state.hotels = []
 
+# ==============================
+# Display queued hotels
+# ==============================
 st.subheader("📋 Hotels queued")
 
 if st.session_state.hotels:
@@ -53,9 +62,11 @@ else:
     st.info("No hotels added")
 
 # ==============================
-# Playwright Scraper
+# Playwright scraper (ONE browser)
 # ==============================
-async def buscar_booking(hotel, checkin, checkout):
+async def buscar_varios_hoteis(hoteis):
+    resultados = []
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
@@ -76,38 +87,49 @@ async def buscar_booking(hotel, checkin, checkout):
 
         page = await context.new_page()
 
-        url = (
-            "https://www.booking.com/searchresults.html"
-            f"?ss={hotel.replace(' ', '+')}"
-            f"&checkin_year={checkin[:4]}"
-            f"&checkin_month={checkin[5:7]}"
-            f"&checkin_monthday={checkin[8:10]}"
-            f"&checkout_year={checkout[:4]}"
-            f"&checkout_month={checkout[5:7]}"
-            f"&checkout_monthday={checkout[8:10]}"
-            "&group_adults=2"
-            "&group_children=0"
-            "&no_rooms=1"
-            "&selected_currency=USD"
-            "&lang=en-us"
-        )
+        for h in hoteis:
+            hotel = h["nome"]
+            checkin = h["ini"]
+            checkout = h["fim"]
 
-        await page.goto(url, timeout=60000)
-        await page.wait_for_timeout(5000)
+            url = (
+                "https://www.booking.com/searchresults.html"
+                f"?ss={hotel.replace(' ', '+')}"
+                f"&checkin_year={checkin[:4]}"
+                f"&checkin_month={checkin[5:7]}"
+                f"&checkin_monthday={checkin[8:10]}"
+                f"&checkout_year={checkout[:4]}"
+                f"&checkout_month={checkout[5:7]}"
+                f"&checkout_monthday={checkout[8:10]}"
+                "&group_adults=2"
+                "&group_children=0"
+                "&no_rooms=1"
+                "&selected_currency=USD"
+                "&lang=en-us"
+            )
 
-        hotels = await page.locator('[data-testid="property-card"]').count()
+            await page.goto(url, timeout=60000)
+            await page.wait_for_timeout(5000)
+
+            total = await page.locator(
+                '[data-testid="property-card"]'
+            ).count()
+
+            resultados.append({
+                "hotel": hotel,
+                "checkin": checkin,
+                "checkout": checkout,
+                "found_results": total,
+                "currency": "USD",
+                "region": "USA"
+            })
 
         await browser.close()
 
-        return {
-            "hotel": hotel,
-            "found_results": hotels,
-            "currency": "USD",
-            "region": "USA"
-        }
+    return resultados
 
 # ==============================
-# Runner seguro para Streamlit
+# Async runner (Streamlit-safe)
 # ==============================
 def run_async(coro):
     loop = asyncio.new_event_loop()
@@ -117,23 +139,16 @@ def run_async(coro):
     return result
 
 # ==============================
-# Button
+# Start search button
 # ==============================
 if st.button("🚀 START SEARCH"):
     if not st.session_state.hotels:
         st.warning("Add at least one hotel")
     else:
-        results = []
         with st.spinner("Searching Booking.com (USA | USD)..."):
-            for h in st.session_state.hotels:
-                r = run_async(
-                    buscar_booking(
-                        h["nome"],
-                        h["ini"],
-                        h["fim"]
-                    )
-                )
-                results.append(r)
+            results = run_async(
+                buscar_varios_hoteis(st.session_state.hotels)
+            )
 
         st.success("Search completed")
 
