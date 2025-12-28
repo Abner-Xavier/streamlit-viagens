@@ -107,13 +107,10 @@ async def scrape_hotels(hotels):
     results = []
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage"
-            ]
-        )
+     browser = await p.chromium.launch(
+    headless=True,
+    args=["--no-sandbox", "--disable-dev-shm-usage"]
+)
 
         context = await browser.new_context(
             locale="en-US",
