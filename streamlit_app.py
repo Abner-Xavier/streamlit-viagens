@@ -58,8 +58,7 @@ async def scrape_detailed_data(browser, hotel_name, hotel_url, checkin, checkout
         # Espera a tabela de quartos carregar
         await page.wait_for_selector(".hprt-roomtype-link", timeout=SELECTOR_TIMEOUT)
         
-        # O SEGREDO PARA A ÁREA: Muitas vezes a área está em um elemento oculto ou em 
-        # tooltips. Vamos capturar o texto de toda a célula do tipo de quarto.
+
         rows = await page.query_selector_all("tr.hprt-table-row")
         extracted_data = []
         
@@ -97,8 +96,7 @@ async def scrape_detailed_data(browser, hotel_name, hotel_url, checkin, checkout
                         qty_available = int(last_opt_val)
                     except:
                         qty_available = 0
-
-            # Só adiciona se for suíte (conforme seu pedido anterior) e tiver preço
+            # Só adiciona se for suíte e tiver preço
             if "suite" in last_room_name.lower() and price:
                 extracted_data.append({
                     "Hotel_Name": hotel_name,
@@ -120,7 +118,7 @@ async def scrape_detailed_data(browser, hotel_name, hotel_url, checkin, checkout
 # --- EXECUÇÃO PRINCIPAL ---
 
 async def run():
-    # ... (mesma lógica de geração de pernoites do seu código)
+    # Pernoite Delta
     from datetime import datetime, timedelta
     overnights = []
     for stay in STAYS_COMPLETES:
