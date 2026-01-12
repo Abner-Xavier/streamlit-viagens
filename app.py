@@ -1,8 +1,14 @@
 import streamlit as st
-from FlightRadar24 import FlightRadar24API
-import pandas as pd
+import subprocess
+import sys
 
-# Inicialização da API
+# Comando para instalar a biblioteca caso o requirements falhe
+try:
+    from FlightRadar24 import FlightRadar24API
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "FlightRadar24"])
+    from FlightRadar24 import FlightRadar24API
+
 fr_api = FlightRadar24API()
 
 st.set_page_config(page_title="Validador de Aeronave", page_icon="✈️")
