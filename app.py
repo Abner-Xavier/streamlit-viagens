@@ -1,16 +1,15 @@
 import streamlit as st
-import os
+import subprocess
+import sys
 
-# FORÇA A INSTALAÇÃO DA BIBLIOTECA CASO ELA NÃO SEJA ENCONTRADA
+# Força a instalação do pacote correto
 try:
     from FlightRadar24 import FlightRadar24API
 except ImportError:
-    os.system("pip install FlightRadar24")
+    # Tenta instalar usando o nome oficial do pacote no PyPI
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pyflightradar24"])
     from FlightRadar24 import FlightRadar24API
 
-import pandas as pd
-
-# Inicialização da API
 fr_api = FlightRadar24API()
 
 st.set_page_config(page_title="Validador de Aeronave", page_icon="✈️")
@@ -25,6 +24,7 @@ if st.button("Validar agora"):
     if flight_number:
         with st.spinner(f"Consultando radares para {flight_number}..."):
             try:
+                # Busca detalhes do voo
                 details = fr_api.get_flight_details(flight_number)
                 
                 if details and 'flight' in details:
@@ -41,8 +41,8 @@ if st.button("Validar agora"):
                     with col2:
                         st.metric("Matrícula (Tail Number)", registration)
                     
-                    st.info(f"**Análise técnica:** Para o modelo {model}, a configuração de assentos geralmente segue o padrão da American Airlines para voos internacionais/transcontinentais.")
+                    st.info(f"**Análise técnica:** Para o modelo {model}, a configuração de assentos geralmente é J4 C2 Y9 (6 Executiva / 9 Econômica).")
                 else:
-                    st.warning("Voo não encontrado no radar no momento. Tente um voo que esteja no ar agora para testar.")
+                    st.warning("Voo não encontrado no radar no momento. Tente um voo que esteja voando agora (Ex: G31000).")
             except Exception as e:
-                st.error(f"Erro na conexão: {e}")
+                st.error(f"Erro na conexão com os dados de voo: {e}")
