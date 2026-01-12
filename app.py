@@ -1,62 +1,69 @@
 import streamlit as st
-import pandas as pd
 from FlightRadar24 import FlightRadar24API
+import pandas as pd
 
-# Inicializa a API
+# Inicialização da API
 fr_api = FlightRadar24API()
 
-st.set_page_config(page_title="Validador de Aeronave", page_icon="✈️")
+st.set_page_config(page_title="Validador de Aeronave Real-Time", page_icon="✈️")
 
-st.title("🔍 Validador de Aeronave (Real-Time)")
-st.markdown("Verifique o modelo e matrícula da aeronave agora via radar.")
+st.title("🔍 Validador de Aeronave por Número de Voo")
+st.markdown("Consulte os dados exatos da aeronave operando agora via FlightRadar24.")
 
-# Campo de entrada
-flight_input = st.text_input("Digite o número do voo (Ex: AA954):", "").upper().strip()
+# Campo de entrada focado apenas no número do voo
+flight_number = st.text_input("Digite o número do voo (ex: AA954, AA930):", "").upper().strip()
 
-if st.button("Validar agora"):
-    if flight_input:
-        with st.spinner(f"Localizando voo {flight_input}..."):
+if st.button("Validar Aeronave"):
+    if flight_number:
+        with st.spinner(f"Buscando dados técnicos para {flight_number}..."):
             try:
-                # PASSO 1: Buscar voos ativos
-                # A função correta não usa 'number', usamos filtros manuais para precisão
-                all_flights = fr_api.get_flights()
+                # Busca detalhes específicos do voo
+                details = fr_api.get_flight_details(flight_number)
                 
-                # Filtramos na lista o voo que corresponde ao número digitado
-                target_flight = next((f for f in all_flights if f.number == flight_input or f.callsign == flight_input), None)
-                
-                if target_flight:
-                    # PASSO 2: Obter detalhes técnicos do objeto encontrado
-                    details = fr_api.get_flight_details(target_flight)
+                if details and 'flight' in details:
+                    f = details['flight']
                     
-                    f_data = details.get('flight', {})
-                    aircraft = f_data.get('aircraft', {})
-                    model = aircraft.get('model', {}).get('text', 'Não identificado')
-                    registration = aircraft.get('registration', 'N/A')
+                    # Extração de dados técnicos da aeronave
+                    aircraft_info = f.get('aircraft', {})
+                    model = aircraft_info.get('model', {}).get('text', 'Não identificado')
+                    registration = aircraft_info.get('registration', 'N/A')
+                    country = aircraft_info.get('country', {}).get('name', 'N/A')
                     
-                    origin = f_data.get('airport', {}).get('origin', {}).get('code', {}).get('iata', '---')
-                    destination = f_data.get('airport', {}).get('destination', {}).get('code', {}).get('iata', '---')
+                    # Dados de rota para contexto
+                    origin = f.get('airport', {}).get('origin', {}).get('code', {}).get('iata', '---')
+                    dest = f.get('airport', {}).get('destination', {}).get('code', {}).get('iata', '---')
+                    status = f.get('status', {}).get('text', 'Status desconhecido')
 
-                    st.success(f"Voo {flight_input} Localizado!")
+                    # Exibição dos resultados
+                    st.success(f"Voo {flight_number} Localizado!")
                     
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.metric("Modelo da Aeronave", model)
-                        st.write(f"**Rota:** {origin} ➔ {destination}")
-                    with col2:
-                        st.metric("Matrícula", registration)
-                        st.write(f"**Altitude:** {target_flight.altitude} pés")
+                        st.subheader("✈️ Dados da Aeronave")
+                        st.write(f"**Modelo:** {model}")
+                        st.write(f"**Matrícula (Tail Number):** {registration}")
+                        st.write(f"**País de Registro:** {country}")
                     
-                    st.divider()
-                    st.subheader("📊 Análise de Inventário")
-                    if "777" in model:
-                        st.info(f"Aeronave detectada: **{model}**. Configuração padrão para voos internacionais AA: **6 assentos na Executiva (J4 C2)**.")
-                    else:
-                        st.info(f"Modelo detectado: **{model}**. Verifique a disponibilidade para esta aeronave específica.")
+                    with col2:
+                        st.subheader("📍 Operação")
+                        st.write(f"**Rota:** {origin} ➔ {dest}")
+                        st.write(f"**Status:** {status}")
+
+                    # Explicação técnica sobre capacidade
+                    st.info(f"""
+                    **Análise Técnica:** O modelo **{model}** determina a configuração de cabines. 
+                    Se for um Boeing 777-200 ou 777-300ER da AA, a configuração premium é focada em Business Class. 
+                    A disponibilidade de assentos (Buckets) é derivada deste modelo de aeronave.
+                    """)
                 else:
-                    st.warning(f"O voo {flight_input} não está ativo no radar neste momento.")
-                    st.info("Nota: Voos aparecem aqui apenas quando estão com o transponder ligado (geralmente de 1h antes da decolagem até o pouso).")
+                    st.error("Voo não encontrado ou não está ativo no radar no momento.")
+                    st.caption("Nota: Voos só aparecem quando há um plano de voo ativo para as próximas horas.")
             
             except Exception as e:
-                st.error(f"Erro ao processar dados: {e}")
+                st.error(f"Erro ao conectar com o serviço de radar: {e}")
     else:
         st.warning("Por favor, insira um número de voo.")
+
+# Rodapé profissional para o GitHub
+st.markdown("---")
+st.caption("Repositório: Abner-Xavier/streamlit-viagens | Dados providos por FlightRadar24API")
