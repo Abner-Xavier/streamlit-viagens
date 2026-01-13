@@ -1,166 +1,141 @@
-import streamlit as st
-from playwright.sync_api import sync_playwright
-import pandas as pd
 import time
-import re
-import subprocess
-import io
-from datetime import datetime
+import csv
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
-# --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="Extrator de Números de Voo", page_icon="✈️", layout="wide")
-
-# --- INSTALAÇÃO ---
-def install_playwright():
-    if 'playwright_installed' not in st.session_state:
-        try:
-            subprocess.run(["playwright", "install", "chromium"], check=True)
-            st.session_state['playwright_installed'] = True
-        except Exception:
-            pass
-
-install_playwright()
-
-# --- MOTOR DE EXTRAÇÃO ---
-def extract_flight_numbers(origin, dest, date_obj, cabin_class):
-    data = []
+def iniciar_driver():
+    """Configura o navegador Chrome para automação."""
+    chrome_options = Options()
+    # chrome_options.add_argument("--headless") # Retire o comentário para não ver o navegador abrindo
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--window-size=1920,1080")
+    # Tenta evitar detecção de bot
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
     
-    with sync_playwright() as p:
-        # Modo Anônimo para evitar bloqueios
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--incognito", "--disable-blink-features=AutomationControlled"]
-        )
-        page = browser.new_page(
-            viewport={"width": 1366, "height": 768},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    return driver
+
+def buscar_voos(origem, destino, data_ida):
+    driver = iniciar_driver()
+    
+    # URL formatada do Google Flights
+    url = f"https://www.google.com/travel/flights?q=Flights%20to%20{destino}%20from%20{origem}%20on%20{data_ida}"
+    print(f"Acessando: {url}")
+    
+    driver.get(url)
+    
+    # Espera para carregar e para você resolver CAPTCHA manualmente se aparecer
+    time.sleep(5) 
+    
+    # Tenta clicar no botão "Concluído" de cookies se aparecer (ajuste conforme necessário)
+    try:
+        botoes = driver.find_elements(By.TAG_NAME, "button")
+        for btn in botoes:
+            if "Aceitar" in btn.text or "Accept" in btn.text:
+                btn.click()
+                break
+    except:
+        pass
+
+    print("Carregando lista de voos...")
+    
+    # Rola a página para carregar mais resultados
+    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+    time.sleep(3)
+
+    voos_encontrados = []
+
+    try:
+        # O Google muda essas classes constantemente.
+        # Uma estratégia mais segura é buscar pelos elementos de lista (role="listitem")
+        # dentro da área principal de resultados.
         
-        # Montar URL
-        date_str = date_obj.strftime("%Y-%m-%d")
-        cabin_map = {"Econômica": "economy", "Executiva": "business", "Primeira": "first"}
-        url = f"https://www.google.com/travel/flights?q=Flights%20from%20{origin}%20to%20{dest}%20on%20{date_str}%20one%20way%20{cabin_map[cabin_class]}%20class"
+        # Localiza a lista de melhores voos e outros voos
+        # A classe .pIav2d geralmente envolve o cartão do voo, mas é volátil.
+        # Vamos usar XPATH genérico para tentar pegar os cartões.
+        flight_cards = driver.find_elements(By.XPATH, "//div[@class='pIav2d']") 
         
-        try:
-            st.toast("Acessando Google Flights...", icon="📡")
-            page.goto(url, timeout=60000)
-            
-            # Limpa Cookies/Popups
-            try: page.get_by_role("button", name=re.compile(r"Reject|Aceitar", re.I)).first.click(timeout=3000)
-            except: pass
-            
-            page.wait_for_load_state("networkidle")
-            
-            # Tenta expandir lista ("Ver mais voos")
+        if not flight_cards:
+            print("Tentando seletor alternativo...")
+            flight_cards = driver.find_elements(By.CSS_SELECTOR, ".pIav2d")
+
+        print(f"Encontrados {len(flight_cards)} possíveis voos. Extraindo dados...")
+
+        for card in flight_cards:
             try:
-                btn = page.locator("button").filter(has_text=re.compile(r"View more|Ver mais", re.I)).first
-                if btn.is_visible():
-                    btn.click()
-                    time.sleep(2)
-            except: pass
-            
-            # Rola para carregar tudo
-            page.mouse.wheel(0, 4000)
-            time.sleep(1.5)
-            
-            # --- EXTRAÇÃO INTELIGENTE DE CÓDIGOS ---
-            # O Google Flights geralmente coloca o número do voo em elementos pequenos no rodapé do cartão
-            # ou junto com o nome da Cia. Vamos pegar todos os textos e filtrar com Regex.
-            
-            cards = page.locator("li, div[role='listitem']").all()
-            
-            for card in cards:
-                text = card.inner_text()
+                # Texto cru do cartão contém quase tudo (quebras de linha separam os dados)
+                texto_cartao = card.text.split('\n')
                 
-                # Regex para encontrar Horário (00:00) - Validador de que é um voo
-                if not re.search(r"\d{1,2}:\d{2}", text): continue
+                # A estrutura do texto geralmente é:
+                # [Horario, Empresa, Duração, Aeroportos, Paradas, Preço, ..., Assentos(opcional)]
                 
-                # 1. Extração de Horários e Preço (para contexto)
-                times = re.findall(r"(\d{1,2}:\d{2}\s?[AP]?M?)", text)
-                price_match = re.search(r"((?:R\$|\$|€|£)\s?[\d,.]+)", text)
-                price = price_match.group(1) if price_match else "N/A"
+                # Tentativa de extração baseada em estrutura comum (pode variar)
+                horario_partida = ""
+                duracao = ""
+                preco = ""
+                empresa = ""
+                assentos = "Não informado" # Padrão
                 
-                # 2. Extração do Número do Voo
-                # Procura padrões comuns como "LA 3055", "AA 930", "G3 1234"
-                # A regex procura: 2 letras maiúsculas + espaço opcional + 2 a 4 números
-                # Excluindo padrões de horário e moeda
-                flight_codes = re.findall(r"(?<!\$)(\b[A-Z0-9]{2}\s?\d{2,4}\b)", text)
+                # Busca por elementos específicos via ARIA-LABEL para ser mais robusto
+                # Aria-labels são usados para leitores de tela e mudam menos que classes CSS
                 
-                # Filtra códigos falsos (como KG do CO2e ou AM/PM)
-                valid_codes = []
-                for code in flight_codes:
-                    if "CO2" not in code and "PM" not in code and "AM" not in code and "KG" not in code:
-                        valid_codes.append(code)
-                
-                # Se achou código, adiciona na lista
-                if valid_codes:
-                    # Remove duplicatas e junta (ex: voo com conexão pode ter 2 números)
-                    code_final = " / ".join(list(set(valid_codes)))
-                else:
-                    # Fallback: Se não achou código explícito, tenta pegar a Cia Aérea
-                    # Geralmente a primeira linha ou logo após o horário
-                    lines = text.split('\n')
-                    code_final = "Verificar Cia (" + (lines[1] if len(lines) > 1 else "N/A") + ")"
+                # Exemplo de extração por texto cru (método fallback)
+                for linha in texto_cartao:
+                    if "h " in linha and "m" in linha and len(linha) < 10: # Ex: 13 h 5 m
+                        duracao = linha
+                    if "R$" in linha or "US$" in linha:
+                        preco = linha
+                    if "restam" in linha.lower() or "left" in linha.lower():
+                        assentos = linha # Ex: "Restam 2 lugares"
 
-                # Verifica se é voo direto ou com paradas
-                stops = "Direto"
-                if "1 stop" in text or "1 parada" in text: stops = "1 Parada"
-                elif "stop" in text or "parada" in text: stops = "+1 Parada"
+                # Tentar pegar a empresa aérea (geralmente as primeiras linhas)
+                if len(texto_cartao) > 2:
+                    empresa = texto_cartao[1] if ":" not in texto_cartao[1] else texto_cartao[0]
 
-                if len(times) >= 1:
-                    data.append({
-                        "Número do Voo": code_final,
-                        "Partida": times[0],
-                        "Chegada": times[1] if len(times) > 1 else "?",
-                        "Paradas": stops,
-                        "Preço": price
-                    })
-
-        except Exception as e:
-            st.error(f"Erro: {e}")
+                if preco: # Só adiciona se achou preço
+                    voo = {
+                        "Origem": origem,
+                        "Destino": destino,
+                        "Empresa": empresa,
+                        "Duração": duracao,
+                        "Preço": preco,
+                        "Assentos": assentos
+                    }
+                    voos_encontrados.append(voo)
+                    print(f"Extraído: {empresa} - {preco}")
             
-        browser.close()
-        return pd.DataFrame(data)
+            except Exception as e:
+                continue
 
-# --- INTERFACE ---
-st.title("🔍 Pesquisador de Números de Voos")
-st.markdown("Descubra os códigos de voo (ex: AA 930) para uma rota e data.")
+    except Exception as e:
+        print(f"Erro ao processar dados: {e}")
+    
+    driver.quit()
+    return voos_encontrados
 
-with st.sidebar:
-    st.header("Configuração")
-    origin = st.text_input("Origem", "GRU", max_chars=3).upper()
-    dest = st.text_input("Destino", "MIA", max_chars=3).upper()
-    date_val = st.date_input("Data", min_value=datetime.today())
-    cabin = st.selectbox("Classe", ["Econômica", "Executiva", "Primeira"])
+def salvar_csv(dados):
+    if not dados:
+        print("Nenhum dado para salvar.")
+        return
 
-if st.button("🚀 Pesquisar Voos", type="primary", use_container_width=True):
-    if origin and dest:
-        with st.status("Varrendo voos...", expanded=True) as status:
-            df = extract_flight_numbers(origin, dest, date_val, cabin)
-            
-            if not df.empty:
-                status.update(label="Concluído!", state="complete", expanded=False)
-                
-                # Mostra estatísticas
-                st.metric("Voos Encontrados", len(df))
-                
-                # Tabela principal
-                st.dataframe(df, use_container_width=True)
-                
-                # Download Excel
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    df.to_excel(writer, index=False)
-                
-                st.download_button(
-                    "📥 Baixar Lista (.xlsx)",
-                    data=output.getvalue(),
-                    file_name=f"voos_{origin}_{dest}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
-            else:
-                status.update(label="Nenhum voo encontrado", state="error")
-                st.warning("Tente outra data ou verifique se o Google pediu Captcha.")
-    else:
-        st.warning("Preencha a rota.")
+    keys = dados[0].keys()
+    with open('voos_google.csv', 'w', newline='', encoding='utf-8') as output_file:
+        dict_writer = csv.DictWriter(output_file, fieldnames=keys)
+        dict_writer.writeheader()
+        dict_writer.writerows(dados)
+    print("Arquivo 'voos_google.csv' salvo com sucesso!")
+
+# --- CONFIGURAÇÃO DA BUSCA ---
+if __name__ == "__main__":
+    ORIGEM = "GRU"       # Código IATA (São Paulo)
+    DESTINO = "JFK"      # Código IATA (Nova York)
+    DATA = "2026-01-17"  # Formato YYYY-MM-DD
+    
+    dados = buscar_voos(ORIGEM, DESTINO, DATA)
+    salvar_csv(dados)
