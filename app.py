@@ -8,7 +8,7 @@ import io
 from datetime import datetime
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="Scanner Visual (Horário)", page_icon="👁️", layout="wide")
+st.set_page_config(page_title="Scanner Geral de Voos", page_icon="🌎", layout="wide")
 
 # --- INSTALAÇÃO ---
 def install_playwright():
@@ -21,11 +21,12 @@ def install_playwright():
 
 install_playwright()
 
-# --- MOTOR DE BUSCA (POR HORÁRIO) ---
-def scan_visual(df_input, max_pax):
-    results = []
+# --- MOTOR DE EXTRAÇÃO ---
+def scrape_all_flights(origin, dest, date_obj, cabin_class):
+    data = []
     
     with sync_playwright() as p:
+        # Browser Invisível (Headless)
         browser = p.chromium.launch(
             headless=True,
             args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
@@ -35,141 +36,132 @@ def scan_visual(df_input, max_pax):
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         
-        status = st.empty()
-        prog = st.progress(0)
+        # URL
+        date_str = date_obj.strftime("%Y-%m-%d")
+        cabin_map = {"Econômica": "economy", "Executiva": "business", "Primeira": "first"}
+        cabin = cabin_map.get(cabin_class, "economy")
         
-        for i, row in df_input.iterrows():
-            origin, dest = row['Origem'].upper(), row['Destino'].upper()
-            date_str = row['Data'].strftime("%Y-%m-%d")
-            # Hora Alvo (Ex: "11:30 PM")
-            target_time = str(row['Horário']).strip()
+        query = f"Flights from {origin} to {dest} on {date_str} one way {cabin} class"
+        url = f"https://www.google.com/travel/flights?q={query.replace(' ', '+')}"
+        
+        try:
+            st.toast("Acessando Google Flights...", icon="🌎")
+            page.goto(url, timeout=60000)
             
-            # Mapeamento de classe
-            cabin_map = {"Econômica": "economy", "Executiva": "business", "Primeira": "first"}
-            cabin = cabin_map.get(row['Classe'], "economy")
+            # Limpa Cookies
+            try: page.get_by_role("button", name=re.compile(r"Reject|Aceitar", re.I)).first.click(timeout=3000)
+            except: pass
             
-            status.info(f"🔎 Buscando voo das **{target_time}** ({origin}->{dest})...")
+            page.wait_for_load_state("networkidle")
             
-            # URL
-            query = f"Flights from {origin} to {dest} on {date_str} one way {cabin} class"
-            url = f"https://www.google.com/travel/flights?q={query.replace(' ', '+')}"
-            
+            # --- ROLAGEM E EXPANSÃO ---
+            # O Google esconde voos. Precisamos clicar em "Ver mais voos" se existir.
             try:
-                page.goto(url, timeout=45000)
-                try: page.get_by_role("button", name=re.compile(r"Reject|Aceitar", re.I)).first.click(timeout=3000)
-                except: pass
-                page.wait_for_load_state("networkidle")
+                btn_more = page.locator("button").filter(has_text="View more flights").or_(page.locator("button").filter(has_text="Ver mais voos"))
+                if btn_more.is_visible():
+                    btn_more.click()
+                    time.sleep(2)
+            except:
+                pass
+            
+            # Scroll para carregar lazy loading
+            page.mouse.wheel(0, 3000)
+            time.sleep(1)
+            
+            # --- COLETA DE DADOS ---
+            # Pega todos os cartões de lista
+            cards = page.locator("li, div[role='listitem']").all()
+            
+            total_found = 0
+            
+            for card in cards:
+                text = card.inner_text()
                 
-                # --- LÓGICA DE IDENTIFICAÇÃO VISUAL ---
-                # Pega todos os cards de voo
-                cards = page.locator("li, div[role='listitem']").all()
-                found_card = None
-                
-                # Procura qual card tem o horário específico
-                for card in cards:
-                    text = card.inner_text()
-                    # Verifica se "11:30 PM" está no texto do cartão
-                    if target_time in text:
-                        found_card = card
-                        break
-                
-                if not found_card:
-                    # Se não achou pelo horário exato, tira print
-                    results.append({
-                        "Rota": f"{origin}-{dest}",
-                        "Horário": target_time,
-                        "Assentos": 0,
-                        "Status": "Voo não encontrado (Horário não bate)",
-                        "Print": page.screenshot()
-                    })
+                # Filtro Básico: Tem cara de voo? (Tem horário AM/PM ou :)
+                if not re.search(r"\d{1,2}:\d{2}", text):
                     continue
-
-                # Se achou o cartão, começa o teste de assentos
-                available = 1
                 
-                for n in range(2, max_pax + 1):
-                    # Clica no seletor de passageiros
-                    btn_pax = page.locator("div[jsaction*='click']").filter(has_text=re.compile(r"^\d+$|passenger", re.I)).first
-                    if not btn_pax.is_visible():
-                         btn_pax = page.get_by_role("button", name=re.compile(r"passenger", re.I)).first
-                    
-                    if btn_pax.is_visible():
-                        btn_pax.click()
-                        # Adiciona passageiro
-                        page.locator("button[aria-label*='Add'], button[aria-label*='Adicionar']").first.click()
-                        # Fecha menu
-                        page.get_by_role("button", name=re.compile(r"Done|Concluído", re.I)).first.click()
-                        
-                        time.sleep(1.5) # Aguarda refresh
-                        
-                        # Re-verifica se o cartão com aquele horário AINDA EXISTE
-                        # O Google pode remover o voo ou mudar o preço/posição
-                        still_exists = False
-                        new_cards = page.locator("li, div[role='listitem']").all()
-                        for c in new_cards:
-                            if target_time in c.inner_text():
-                                still_exists = True
-                                break
-                        
-                        if still_exists:
-                            available = n
-                        else:
-                            break # Voo sumiu
-                    else:
-                        break
-
-                results.append({
-                    "Rota": f"{origin}-{dest}",
-                    "Horário": target_time,
-                    "Assentos": available,
-                    "Status": "Disponível" if available > 0 else "Indisponível",
-                    "Print": None
-                })
-
-            except Exception as e:
-                results.append({
-                    "Rota": f"{origin}-{dest}",
-                    "Horário": target_time,
-                    "Assentos": 0,
-                    "Status": f"Erro: {str(e)}",
-                    "Print": page.screenshot()
-                })
+                # Extração via Regex
+                # 1. Horários (Ex: 8:45 PM – 5:30 AM)
+                times = re.findall(r"(\d{1,2}:\d{2}\s?[AP]?M?)", text)
+                if len(times) < 2: continue # Precisa ter partida e chegada
                 
-            prog.progress((i+1)/len(df_input))
+                # 2. Preço (Ex: $5,006 ou R$ 5.006)
+                price_match = re.search(r"((?:R\$|\$|€|£)\s?[\d,.]+)", text)
+                price = price_match.group(1) if price_match else "N/A"
+                
+                # 3. Duração
+                duration_match = re.search(r"(\d+\s?hr\s?\d*\s?min|\d+\s?h\s?\d*\s?m)", text)
+                duration = duration_match.group(1) if duration_match else ""
+                
+                # 4. Cia Aérea e Paradas
+                # Aqui é heurística: removemos o que já achamos e limpamos o texto
+                # Geralmente a Cia aparece no começo ou meio. Vamos salvar o texto bruto limpo para análise.
+                clean_text = text.replace("\n", " | ")
+                
+                # Tenta identificar paradas
+                stops = "Direto" if "Nonstop" in text or "Direto" in text else "Com paradas"
+                if "1 stop" in text or "1 parada" in text: stops = "1 Parada"
+                
+                data.append({
+                    "Partida": times[0],
+                    "Chegada": times[1] if len(times) > 1 else "?",
+                    "Duração": duration,
+                    "Preço": price,
+                    "Paradas": stops,
+                    "Texto Bruto (Ref)": clean_text[:100] # Corta para não ficar gigante
+                })
+                total_found += 1
+                
+        except Exception as e:
+            st.error(f"Erro na extração: {e}")
             
         browser.close()
-        status.success("Concluído!")
-        return results
+        return pd.DataFrame(data)
 
 # --- INTERFACE ---
-st.title("👁️ Scanner Visual (Busca por Horário)")
-st.markdown("Use o **Horário de Partida** exatamente como aparece no Google (ex: `11:30 PM`) para identificar o voo.")
+st.title("📊 Extrator de Voos para Excel")
+st.markdown("Identifica **todos** os voos disponíveis na página (melhores e outros) e salva em planilha.")
 
-c1, c2 = st.columns(2)
-max_pax = c1.slider("Max Passageiros", 1, 9, 9)
+with st.sidebar:
+    st.header("Dados da Viagem")
+    origin = st.text_input("Origem", "GRU", max_chars=3).upper()
+    dest = st.text_input("Destino", "MIA", max_chars=3).upper()
+    date_val = st.date_input("Data", min_value=datetime.today())
+    cabin = st.selectbox("Classe", ["Econômica", "Executiva", "Primeira"])
 
-# Tabela de Entrada
-default = [{"Origem": "GRU", "Destino": "MIA", "Data": datetime(2026, 1, 17), "Horário": "11:30 PM", "Classe": "Econômica"}]
-df = st.data_editor(default, num_rows="dynamic", width="stretch", column_config={
-    "Data": st.column_config.DateColumn(format="DD/MM/YYYY"),
-    "Horário": st.column_config.TextColumn(help="Copie do site, ex: 11:30 PM ou 23:30"),
-    "Classe": st.column_config.SelectboxColumn(options=["Econômica", "Executiva", "Primeira"])
-})
-
-if st.button("🚀 Verificar Assentos", type="primary", use_container_width=True):
-    if len(df) > 0:
-        data = scan_visual(pd.DataFrame(df), max_pax)
-        
-        st.divider()
-        for res in data:
-            with st.container(border=True):
-                col1, col2, col3 = st.columns([2, 1, 2])
-                col1.metric("Voo", f"{res['Rota']} ({res['Horário']})")
+if st.button("🚀 Pesquisar e Gerar Excel", type="primary", use_container_width=True):
+    if origin and dest:
+        with st.status("Varrendo o Google Flights...", expanded=True) as status:
+            status.write("🔍 Iniciando navegador...")
+            df_result = scrape_all_flights(origin, dest, date_val, cabin)
+            
+            if not df_result.empty:
+                status.write(f"✅ Encontrados {len(df_result)} voos!")
+                status.update(label="Concluído!", state="complete", expanded=False)
                 
-                color = "normal" if res['Assentos'] > 0 else "off"
-                col2.metric("Assentos", res['Assentos'], delta=res['Status'], delta_color=color)
+                st.divider()
+                st.subheader("Resultados Encontrados")
                 
-                if res['Assentos'] == 0 and res['Print']:
-                    st.image(res['Print'], caption="Tela do Erro", width=500)
+                # Mostra tabela na tela
+                st.dataframe(df_result, use_container_width=True)
+                
+                # Botão Download
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    df_result.to_excel(writer, index=False)
+                
+                file_name = f"voos_{origin}_{dest}_{date_val}.xlsx"
+                
+                st.download_button(
+                    label="📥 Baixar Planilha (.xlsx)",
+                    data=output.getvalue(),
+                    file_name=file_name,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+            else:
+                status.update(label="Nenhum voo encontrado", state="error")
+                st.error("Não foi possível extrair dados. O Google pode ter pedido CAPTCHA ou não há voos.")
     else:
-        st.warning("Preencha a tabela.")
+        st.warning("Preencha Origem e Destino.")
