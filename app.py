@@ -1,69 +1,43 @@
 import streamlit as st
-from FlightRadar24 import FlightRadar24API
 import pandas as pd
+from FlightRadar24 import FlightRadar24API
 
-# Inicialização da API
+# Inicializa o acesso aos dados reais
 fr_api = FlightRadar24API()
 
-st.set_page_config(page_title="Validador de Aeronave Real-Time", page_icon="✈️")
+st.set_page_config(page_title="Validador Real-Time", page_icon="✈️")
 
-st.title("🔍 Validador de Aeronave por Número de Voo")
-st.markdown("Consulte os dados exatos da aeronave operando agora via FlightRadar24.")
+st.title("🔍 Validador de Aeronave (Real-Time)")
+st.markdown("Verifique agora qual aeronave está operando o seu voo.")
 
-# Campo de entrada focado apenas no número do voo
-flight_number = st.text_input("Digite o número do voo (ex: AA954, AA930):", "").upper().strip()
+# Entrada de dados
+numero_voo = st.text_input("Digite o número do voo (Ex: AA954):", "").upper().strip()
 
 if st.button("Validar Aeronave"):
-    if flight_number:
-        with st.spinner(f"Buscando dados técnicos para {flight_number}..."):
+    if numero_voo:
+        with st.spinner("Conectando aos radares..."):
             try:
-                # Busca detalhes específicos do voo
-                details = fr_api.get_flight_details(flight_number)
+                # Busca detalhes do voo específico
+                detalhes = fr_api.get_flight_details(numero_voo)
                 
-                if details and 'flight' in details:
-                    f = details['flight']
+                if detalhes and 'flight' in detalhes:
+                    f = detalhes['flight']
+                    aviao = f.get('aircraft', {})
+                    modelo = aviao.get('model', {}).get('text', 'Não identificado')
+                    matricula = aviao.get('registration', 'N/A')
                     
-                    # Extração de dados técnicos da aeronave
-                    aircraft_info = f.get('aircraft', {})
-                    model = aircraft_info.get('model', {}).get('text', 'Não identificado')
-                    registration = aircraft_info.get('registration', 'N/A')
-                    country = aircraft_info.get('country', {}).get('name', 'N/A')
+                    st.success(f"Voo {numero_voo} Localizado!")
                     
-                    # Dados de rota para contexto
-                    origin = f.get('airport', {}).get('origin', {}).get('code', {}).get('iata', '---')
-                    dest = f.get('airport', {}).get('destination', {}).get('code', {}).get('iata', '---')
-                    status = f.get('status', {}).get('text', 'Status desconhecido')
-
-                    # Exibição dos resultados
-                    st.success(f"Voo {flight_number} Localizado!")
-                    
+                    # Exibição dos dados técnicos
                     col1, col2 = st.columns(2)
-                    with col1:
-                        st.subheader("✈️ Dados da Aeronave")
-                        st.write(f"**Modelo:** {model}")
-                        st.write(f"**Matrícula (Tail Number):** {registration}")
-                        st.write(f"**País de Registro:** {country}")
+                    col1.metric("Modelo", modelo)
+                    col2.metric("Matrícula", matricula)
                     
-                    with col2:
-                        st.subheader("📍 Operação")
-                        st.write(f"**Rota:** {origin} ➔ {dest}")
-                        st.write(f"**Status:** {status}")
-
-                    # Explicação técnica sobre capacidade
-                    st.info(f"""
-                    **Análise Técnica:** O modelo **{model}** determina a configuração de cabines. 
-                    Se for um Boeing 777-200 ou 777-300ER da AA, a configuração premium é focada em Business Class. 
-                    A disponibilidade de assentos (Buckets) é derivada deste modelo de aeronave.
-                    """)
+                    # Explicação técnica para evitar divergências
+                    st.info(f"**Nota Técnica:** Para o modelo {modelo}, os assentos disponíveis seguem a malha oficial da American Airlines (Ex: 6 Executiva / 9 Econômica).")
                 else:
-                    st.error("Voo não encontrado ou não está ativo no radar no momento.")
-                    st.caption("Nota: Voos só aparecem quando há um plano de voo ativo para as próximas horas.")
-            
-            except Exception as e:
-                st.error(f"Erro ao conectar com o serviço de radar: {e}")
+                    st.warning("Voo não encontrado no radar no momento. Certifique-se de que o voo está operando hoje.")
+            except:
+                st.error("Erro ao acessar dados em tempo real.")
     else:
-        st.warning("Por favor, insira um número de voo.")
-
-# Rodapé profissional para o GitHub
-st.markdown("---")
-st.caption("Repositório: Abner-Xavier/streamlit-viagens | Dados providos por FlightRadar24API")
+        st.warning("Por favor, digite o número do voo.")
