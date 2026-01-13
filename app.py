@@ -5,12 +5,13 @@ import time
 import re
 import subprocess
 import io
-from datetime import datetime, timedelta
+import random
+from datetime import datetime
 
-# --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Scanner de Voos para Excel", page_icon="📊", layout="wide")
+# --- CONFIGURAÇÃO ---
+st.set_page_config(page_title="Scanner Pro - Excel", page_icon="🕵️", layout="wide")
 
-# --- INSTALAÇÃO AUTOMÁTICA ---
+# --- INSTALAÇÃO ---
 def install_playwright():
     if 'playwright_installed' not in st.session_state:
         try:
@@ -21,11 +22,11 @@ def install_playwright():
 
 install_playwright()
 
-# --- FUNÇÕES AUXILIARES ---
-def parse_seat_counts_text(text, year):
-    """Lê o formato 'Seat Counts ORIGEM-DESTINO ...' e transforma em Tabela"""
+# --- AUXILIARES ---
+def parse_text(text, year):
     flights = []
-    # Regex flexível para capturar: AAA-BBB ... XX 123 ... MMM DD
+    # Regex captura: ORIGEM-DESTINO ... (CIA NUMERO) ... DATA
+    # Aceita formatos variados de texto colado
     regex_pattern = r"([A-Z]{3})-([A-Z]{3}).*?([A-Z0-9]{2}\s?\d{1,4}).*?([A-Za-z]{3}\s\d{1,2})"
     
     lines = text.strip().split('\n')
@@ -34,7 +35,6 @@ def parse_seat_counts_text(text, year):
         if match:
             origin, dest, flight_num, date_part = match.groups()
             try:
-                # Converte "Jan 17" + Ano para Data Real
                 date_obj = datetime.strptime(f"{date_part} {year}", "%b %d %Y")
                 flights.append({
                     "Voo": flight_num.strip(),
@@ -46,226 +46,225 @@ def parse_seat_counts_text(text, year):
                 continue
     return pd.DataFrame(flights)
 
-def convert_df_to_excel(df):
-    """Converte DataFrame para binário Excel para download"""
+def to_excel(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False, sheet_name='Resultados')
-    processed_data = output.getvalue()
-    return processed_data
+    return output.getvalue()
 
 # --- CLASSE DO SCANNER ---
-class ExcelFlightScanner:
-    def __init__(self):
+class FlightBot:
+    def __init__(self, headless=True):
+        self.headless = headless
         self.browser = None
         self.context = None
         self.page = None
 
     def start(self):
-        playwright = sync_playwright().start()
-        self.browser = playwright.chromium.launch(
-            headless=True, # Mude para False se quiser ver o robô
-            args=["--disable-blink-features=AutomationControlled"]
+        p = sync_playwright().start()
+        # Argumentos para evitar detecção de bot
+        self.browser = p.chromium.launch(
+            headless=self.headless,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-infobars"
+            ]
         )
         self.context = self.browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800}
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={"width": 1366, "height": 768}
         )
         self.page = self.context.new_page()
 
     def stop(self):
-        if self.browser:
-            self.browser.close()
+        if self.browser: self.browser.close()
 
-    def check_availability(self, row, cabin_class, max_pax, one_way):
+    def check_flight(self, row, cabin_class, max_pax, one_way):
+        err_screenshot = None
         try:
-            # 1. Monta a URL (Método mais rápido e estável que preencher form)
-            origin = row['Origem'].upper()
-            dest = row['Destino'].upper()
-            flight_num = row['Voo']
-            date_str = row['Data'].strftime("%Y-%m-%d") # Formato YYYY-MM-DD para URL
+            # 1. Monta URL
+            flight_full = row['Voo'] # Ex: AA 954
+            # Extrai apenas o número (954) para busca mais segura
+            flight_number_only = "".join(re.findall(r"\d+", flight_full))
+            
+            origin, dest = row['Origem'], row['Destino']
+            date_str = row['Data'].strftime("%Y-%m-%d")
             
             cabin_map = {"Econômica": "economy", "Executiva": "business", "Primeira": "first"}
-            cabin_query = cabin_map.get(cabin_class, "economy")
-            trip_type = "one way" if one_way else "round trip"
-
-            # Busca Google: "Flights from GRU to MIA on 2026-01-15 AA930 one way business class"
-            search_query = f"Flights from {origin} to {dest} on {date_str} {flight_num} {trip_type} {cabin_query} class"
-            encoded_query = search_query.replace(" ", "+")
-            url = f"https://www.google.com/travel/flights?q={encoded_query}"
+            cabin = cabin_map.get(cabin_class, "economy")
+            trip = "one way" if one_way else "round trip"
             
-            self.page.goto(url, timeout=45000)
+            # URL de busca direta
+            query = f"Flights from {origin} to {dest} on {date_str} {trip} {cabin} class"
+            url = f"https://www.google.com/travel/flights?q={query.replace(' ', '+')}"
             
-            # Fecha cookies/popups
-            try: self.page.get_by_role("button", name=re.compile(r"Reject|Rejeitar|Accept|Aceitar", re.I)).first.click(timeout=3000)
+            self.page.goto(url, timeout=60000)
+            
+            # Tenta fechar cookies
+            try: self.page.get_by_role("button", name=re.compile(r"Rejeitar|Reject|Aceitar|Accept", re.I)).first.click(timeout=4000)
             except: pass
             
             self.page.wait_for_load_state("networkidle")
+            time.sleep(2) # Pausa humana essencial
 
-            # Regex para confirmar se o voo certo está na tela
-            clean_num = flight_num.replace(" ", "")
-            letters = "".join(re.findall(r"[a-zA-Z]+", clean_num))
-            numbers = "".join(re.findall(r"\d+", clean_num))
-            # Procura por "AA" e "930" próximos
-            flight_regex = re.compile(f"{letters}\\s*{numbers}", re.I)
+            # 2. Localizar o Cartão do Voo
+            # Estratégia: Procura o cartão que contém o NÚMERO do voo (ex: 954)
+            # O Google usa role='listitem' para cada voo
+            
+            # Tenta achar o container do voo
+            flight_card = self.page.locator("li, div[role='listitem']").filter(has_text=flight_number_only).first
+            
+            # Se não achou de primeira, rola a página (scroll) e tenta de novo
+            if not flight_card.is_visible():
+                self.page.mouse.wheel(0, 500)
+                time.sleep(1)
+                flight_card = self.page.locator("li, div[role='listitem']").filter(has_text=flight_number_only).first
 
-            # Verifica se o card do voo existe
-            card = self.page.locator("li, div[role='listitem']").filter(has_text=flight_regex).first
-            if not card.is_visible():
-                return 0, "Voo não encontrado (Verifique Data/Rota)"
+            if not flight_card.is_visible():
+                # Tira print do erro
+                err_screenshot = self.page.screenshot()
+                return 0, "Voo não encontrado (Veja Print)", err_screenshot
 
+            # Se chegamos aqui, o voo existe na lista!
             confirmed_seats = 1
             
-            # Loop de incremento de passageiros
+            # 3. Teste de Assentos (Incremental)
             for n in range(2, max_pax + 1):
-                # Abre Pax
+                # Localiza botão de pax (dentro do menu superior, não do card)
+                # O botão geralmente tem um número (ex: "1")
                 btn_pax = self.page.locator("div[jsaction*='click']").filter(has_text=re.compile(r"^\d+$|passenger", re.I)).first
-                if not btn_pax.is_visible(): break
-                btn_pax.click()
                 
-                # Clica Add Adulto
-                self.page.locator("button[aria-label*='Add'], button[aria-label*='Adicionar']").first.click()
+                # Se não achar o botão, tenta outro seletor genérico
+                if not btn_pax.is_visible():
+                     btn_pax = self.page.get_by_role("button", name=re.compile(r"passenger|passageiro", re.I)).first
                 
-                # Clica Done
-                self.page.get_by_role("button", name=re.compile(r"Done|Concluído", re.I)).first.click()
-                
-                # Aguarda update
-                time.sleep(1.0)
-                self.page.wait_for_load_state("domcontentloaded")
-                
-                # Checa se voo sumiu
-                card = self.page.locator("li, div[role='listitem']").filter(has_text=flight_regex).first
-                if card.is_visible():
-                    confirmed_seats = n
+                if btn_pax.is_visible():
+                    btn_pax.click()
+                    time.sleep(0.5)
+                    
+                    # Clica no + (Adicionar adulto)
+                    self.page.locator("button[aria-label*='Add'], button[aria-label*='Adicionar']").first.click()
+                    
+                    # Clica Concluído/Done
+                    self.page.get_by_role("button", name=re.compile(r"Done|Concluído", re.I)).first.click()
+                    
+                    # Espera a lista atualizar (loading spinner)
+                    time.sleep(1.5) 
+                    self.page.wait_for_load_state("domcontentloaded")
+                    
+                    # Verifica se o CARD do voo ainda está visível
+                    flight_card = self.page.locator("li, div[role='listitem']").filter(has_text=flight_number_only).first
+                    
+                    if flight_card.is_visible():
+                        confirmed_seats = n
+                    else:
+                        # Voo sumiu, limite atingido
+                        return confirmed_seats, "Limite Atingido", None
                 else:
-                    return confirmed_seats, "Limite atingido (Voo sumiu)"
+                    return confirmed_seats, "Erro no Botão Pax", None
             
-            return confirmed_seats, "Capacidade máxima verificada"
+            return confirmed_seats, "Capacidade Máxima", None
 
         except Exception as e:
-            return -1, f"Erro: {str(e)}"
+            try: err_screenshot = self.page.screenshot()
+            except: pass
+            return -1, f"Erro Técnico: {str(e)}", err_screenshot
 
-# --- INTERFACE DO USUÁRIO ---
-st.title("📊 Scanner de Voos Automático")
-st.markdown("Insira os dados, verifique a disponibilidade e baixe a planilha Excel.")
+# --- INTERFACE ---
+st.title("🕵️ Scanner de Voos Pro (Debug)")
+st.markdown("Verifica disponibilidade e exporta para Excel. Use o modo visual se estiver dando erro.")
 
-# Sidebar de Configurações
+# Sidebar
 with st.sidebar:
-    st.header("Configurações")
-    cabin = st.selectbox("Classe", ["Econômica", "Econômica Premium", "Executiva", "Primeira"], index=2)
-    max_pax = st.slider("Testar até quantos passageiros?", 1, 9, 9)
-    one_way = st.checkbox("Apenas Ida (One Way)", value=True)
-    target_year = st.number_input("Ano da Viagem (para Textos)", 2025, 2030, 2026)
-
-# Abas de Entrada
-tab_text, tab_table = st.tabs(["📝 Colar Texto (Batch)", "📅 Tabela Manual"])
-
-df_input = pd.DataFrame()
-
-with tab_text:
-    st.caption("Cole linhas no formato: 'Seat Counts GRU-MIA ... AA 930 ... Jan 17'")
-    raw_text = st.text_area("Lista de Voos", height=150)
-    if raw_text:
-        df_parsed = parse_seat_counts_text(raw_text, target_year)
-        if not df_parsed.empty:
-            st.info(f"{len(df_parsed)} voos identificados.")
-            df_input = df_parsed
-        else:
-            st.warning("Formato não reconhecido.")
-
-with tab_table:
-    st.caption("Adicione voos manualmente na tabela abaixo:")
-    # Tabela editável
-    empty_df = pd.DataFrame(columns=["Voo", "Origem", "Destino", "Data"])
-    # Se já tiver dados do texto, usa eles, senão cria linhas vazias
-    data_source = df_input if not df_input.empty else pd.DataFrame([{"Voo": "AA 930", "Origem": "GRU", "Destino": "MIA", "Data": datetime(2026, 1, 17)}])
+    st.header("⚙️ Configuração")
+    # NOVO: Checkbox para ver o navegador
+    show_browser = st.checkbox("Ver robô trabalhando (Headless False)", value=False, help="Marque isso se estiver dando 'Voo não encontrado' para ver o que está acontecendo.")
     
-    edited_df = st.data_editor(
-        data_source,
-        num_rows="dynamic",
-        column_config={
-            "Data": st.column_config.DateColumn("Data da Viagem", format="DD/MM/YYYY")
-        },
-        use_container_width=True
-    )
-    # A tabela manual tem prioridade se for modificada
-    if not edited_df.empty:
-        df_input = edited_df
+    cabin = st.selectbox("Classe", ["Econômica", "Executiva", "Primeira"], index=1)
+    max_pax = st.slider("Max Passageiros", 1, 9, 9)
+    year_ref = st.number_input("Ano da Viagem", 2025, 2030, 2026)
+    one_way = st.checkbox("Só Ida (One Way)", value=True)
 
-# Botão de Ação
-st.divider()
-col_action, col_download = st.columns([1, 1])
+# Tabs
+t1, t2 = st.tabs(["📝 Texto (Batch)", "📅 Manual"])
+df_final_input = pd.DataFrame()
 
-if "results" not in st.session_state:
-    st.session_state.results = None
+with t1:
+    txt = st.text_area("Cole a lista aqui:", height=150, placeholder="Seat Counts GRU-MIA ... AA 930 ... Jan 17")
+    if txt:
+        parsed = parse_text(txt, year_ref)
+        if not parsed.empty:
+            st.info(f"{len(parsed)} voos lidos.")
+            df_final_input = parsed
 
-with col_action:
-    if st.button("🚀 Iniciar Varredura e Gerar Excel", type="primary", use_container_width=True):
-        if df_input.empty:
-            st.error("Adicione voos na tabela ou cole o texto primeiro.")
-        else:
-            scanner = ExcelFlightScanner()
-            results_list = []
+with t2:
+    base = df_final_input if not df_final_input.empty else pd.DataFrame([{"Voo": "AA 930", "Origem": "GRU", "Destino": "MIA", "Data": datetime(2026, 1, 17)}])
+    edited = st.data_editor(base, num_rows="dynamic", use_container_width=True, column_config={"Data": st.column_config.DateColumn(format="DD/MM/YYYY")})
+    if not edited.empty:
+        df_final_input = edited
+
+# Botão Iniciar
+if st.button("🚀 Iniciar Varredura", type="primary"):
+    if df_final_input.empty:
+        st.error("Insira dados primeiro.")
+    else:
+        # Inicia Scanner
+        bot = FlightBot(headless=not show_browser) # Inverte lógica do checkbox
+        results = []
+        
+        status = st.status("Iniciando...", expanded=True)
+        progress = st.progress(0)
+        
+        try:
+            bot.start()
+            total = len(df_final_input)
             
-            # Barra de progresso
-            prog_bar = st.progress(0)
-            status_box = st.status("Iniciando navegador...", expanded=True)
+            for i, row in df_final_input.iterrows():
+                status.write(f"🔎 ({i+1}/{total}) Verificando **{row['Voo']}**...")
+                
+                seats, msg, img = bot.check_flight(row, cabin, max_pax, one_way)
+                
+                results.append({
+                    "Voo": row['Voo'],
+                    "Rota": f"{row['Origem']}-{row['Destino']}",
+                    "Data": row['Data'],
+                    "Assentos": seats if seats > 0 else 0,
+                    "Mensagem": msg
+                })
+                
+                # Se der erro, mostra imagem na hora
+                if seats <= 0 and img:
+                    st.warning(f"Falha visual no voo {row['Voo']}:")
+                    st.image(img, caption="O que o robô viu", width=500)
+                
+                progress.progress((i+1)/total)
             
-            try:
-                scanner.start()
-                total = len(df_input)
-                
-                for idx, row in df_input.iterrows():
-                    # Validação básica
-                    if pd.isna(row['Voo']) or pd.isna(row['Origem']): continue
-                    
-                    status_box.write(f"✈️ ({idx+1}/{total}) Analisando **{row['Voo']}** ({row['Origem']} -> {row['Destino']})...")
-                    
-                    seats, msg = scanner.check_availability(row, cabin, max_pax, one_way)
-                    
-                    results_list.append({
-                        "Voo": row['Voo'],
-                        "Origem": row['Origem'],
-                        "Destino": row['Destino'],
-                        "Data": row['Data'],
-                        "Classe": cabin,
-                        "Assentos Disponíveis": seats if seats >= 0 else 0,
-                        "Status": msg if seats >= 0 else "Erro",
-                        "Detalhe": msg
-                    })
-                    
-                    prog_bar.progress((idx + 1) / total)
-                
-                scanner.stop()
-                status_box.update(label="Varredura Completa!", state="complete", expanded=False)
-                
-                # Salva resultados na sessão
-                st.session_state.results = pd.DataFrame(results_list)
-                st.balloons()
-                
-            except Exception as e:
-                scanner.stop()
-                st.error(f"Ocorreu um erro: {e}")
+            bot.stop()
+            status.update(label="Finalizado!", state="complete", expanded=False)
+            
+            # RESULTADOS
+            res_df = pd.DataFrame(results)
+            st.session_state['last_result'] = res_df # Salva para não perder
+            
+        except Exception as e:
+            bot.stop()
+            st.error(f"Erro fatal: {e}")
 
-# Exibição e Download
-if st.session_state.results is not None:
-    res_df = st.session_state.results
+# EXIBIÇÃO E DOWNLOAD (Fora do bloco do botão para persistir)
+if 'last_result' in st.session_state:
+    df_res = st.session_state['last_result']
     
-    st.subheader("📋 Resultados")
-    # Estiliza a tabela: Verde se tiver assentos, Vermelho se for 0
-    st.dataframe(
-        res_df.style.map(lambda x: 'background-color: #ffcdd2' if x == 0 else 'background-color: #c8e6c9', subset=['Assentos Disponíveis']),
-        use_container_width=True
-    )
+    st.divider()
+    st.subheader("📊 Resultado Final")
     
-    # Gera o Excel
-    excel_data = convert_df_to_excel(res_df)
+    # Colore a tabela
+    def color_rows(val):
+        if isinstance(val, int) and val > 0: return 'background-color: #d4edda; color: black' # Verde
+        return 'background-color: #f8d7da; color: black' # Vermelho
     
-    with col_download:
-        st.download_button(
-            label="📥 Baixar Tabela em Excel (.xlsx)",
-            data=excel_data,
-            file_name="disponibilidade_voos.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
+    st.dataframe(df_res.style.map(color_rows, subset=['Assentos']), use_container_width=True)
+    
+    # Download Excel
+    xlsx = to_excel(df_res)
+    st.download_button("📥 Baixar Planilha Excel", data=xlsx, file_name="voos_disponibilidade.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
