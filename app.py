@@ -8,7 +8,7 @@ import io
 from datetime import datetime
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="Scanner de Rota (Sem Voo)", page_icon="✈️", layout="wide")
+st.set_page_config(page_title="Scanner Visual (Horário)", page_icon="👁️", layout="wide")
 
 # --- INSTALAÇÃO ---
 def install_playwright():
@@ -21,156 +21,155 @@ def install_playwright():
 
 install_playwright()
 
-# --- MOTOR DE BUSCA (FOCADO NA ROTA) ---
-def scan_routes(df_input, max_pax):
+# --- MOTOR DE BUSCA (POR HORÁRIO) ---
+def scan_visual(df_input, max_pax):
     results = []
     
     with sync_playwright() as p:
-        # Modo invisível (Headless) para servidor
         browser = p.chromium.launch(
             headless=True,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"]
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
         )
-        # Contexto mobile/tablet as vezes carrega mais rápido, mas vamos usar desktop padrão
         page = browser.new_page(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={"width": 1366, "height": 768}
+            viewport={"width": 1366, "height": 768},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         
-        prog_bar = st.progress(0)
         status = st.empty()
+        prog = st.progress(0)
         
         for i, row in df_input.iterrows():
-            # Prepara dados
             origin, dest = row['Origem'].upper(), row['Destino'].upper()
             date_str = row['Data'].strftime("%Y-%m-%d")
+            # Hora Alvo (Ex: "11:30 PM")
+            target_time = str(row['Horário']).strip()
             
             # Mapeamento de classe
             cabin_map = {"Econômica": "economy", "Executiva": "business", "Primeira": "first"}
             cabin = cabin_map.get(row['Classe'], "economy")
             
-            status.markdown(f"🔎 Analisando rota **{origin} ➔ {dest}** em {date_str}...")
+            status.info(f"🔎 Buscando voo das **{target_time}** ({origin}->{dest})...")
             
-            # URL de busca
+            # URL
             query = f"Flights from {origin} to {dest} on {date_str} one way {cabin} class"
             url = f"https://www.google.com/travel/flights?q={query.replace(' ', '+')}"
             
             try:
                 page.goto(url, timeout=45000)
-                
-                # Fecha popups
                 try: page.get_by_role("button", name=re.compile(r"Reject|Aceitar", re.I)).first.click(timeout=3000)
                 except: pass
-                
                 page.wait_for_load_state("networkidle")
                 
-                # --- AQUI ESTÁ A MUDANÇA: PEGA O PRIMEIRO VOO ---
-                # Não procuramos por "AA 930". Pegamos o primeiro card da lista.
-                first_card = page.locator("li, div[role='listitem']").first
+                # --- LÓGICA DE IDENTIFICAÇÃO VISUAL ---
+                # Pega todos os cards de voo
+                cards = page.locator("li, div[role='listitem']").all()
+                found_card = None
                 
-                if not first_card.is_visible():
+                # Procura qual card tem o horário específico
+                for card in cards:
+                    text = card.inner_text()
+                    # Verifica se "11:30 PM" está no texto do cartão
+                    if target_time in text:
+                        found_card = card
+                        break
+                
+                if not found_card:
+                    # Se não achou pelo horário exato, tira print
                     results.append({
                         "Rota": f"{origin}-{dest}",
-                        "Data": row['Data'],
+                        "Horário": target_time,
                         "Assentos": 0,
-                        "Detalhe": "Nenhum voo encontrado nesta data",
+                        "Status": "Voo não encontrado (Horário não bate)",
                         "Print": page.screenshot()
                     })
                     continue
 
-                # Extrai informações do voo encontrado para mostrar ao usuário
-                try:
-                    # Tenta ler o horário e a cia aérea para confirmar qual voo pegou
-                    card_text = first_card.inner_text().split('\n')
-                    flight_info = f"{card_text[0]} - {card_text[1]}" # Ex: 8:45 PM - American
-                except:
-                    flight_info = "Primeiro voo da lista"
-
-                # TESTE DE CAPACIDADE
+                # Se achou o cartão, começa o teste de assentos
                 available = 1
                 
                 for n in range(2, max_pax + 1):
-                    # Menu Pax
+                    # Clica no seletor de passageiros
                     btn_pax = page.locator("div[jsaction*='click']").filter(has_text=re.compile(r"^\d+$|passenger", re.I)).first
-                    if not btn_pax.is_visible(): 
+                    if not btn_pax.is_visible():
                          btn_pax = page.get_by_role("button", name=re.compile(r"passenger", re.I)).first
                     
                     if btn_pax.is_visible():
                         btn_pax.click()
-                        # Add
+                        # Adiciona passageiro
                         page.locator("button[aria-label*='Add'], button[aria-label*='Adicionar']").first.click()
-                        # Done
+                        # Fecha menu
                         page.get_by_role("button", name=re.compile(r"Done|Concluído", re.I)).first.click()
                         
-                        time.sleep(1.2) # Breve pausa para reload
+                        time.sleep(1.5) # Aguarda refresh
                         
-                        # Verifica se o PRIMEIRO card ainda existe/é visível
-                        # Nota: Se o voo lotar, ele some ou muda de posição. 
-                        # Assumimos que se o primeiro card mudar drasticamente ou sumir, atingiu o limite.
-                        # Mas o Google costuma apenas remover o voo da lista se não tiver vaga.
+                        # Re-verifica se o cartão com aquele horário AINDA EXISTE
+                        # O Google pode remover o voo ou mudar o preço/posição
+                        still_exists = False
+                        new_cards = page.locator("li, div[role='listitem']").all()
+                        for c in new_cards:
+                            if target_time in c.inner_text():
+                                still_exists = True
+                                break
                         
-                        if page.locator("li, div[role='listitem']").first.is_visible():
+                        if still_exists:
                             available = n
                         else:
-                            break
+                            break # Voo sumiu
                     else:
                         break
-                
+
                 results.append({
                     "Rota": f"{origin}-{dest}",
-                    "Data": row['Data'],
+                    "Horário": target_time,
                     "Assentos": available,
-                    "Detalhe": f"Voo detectado: {flight_info}",
+                    "Status": "Disponível" if available > 0 else "Indisponível",
                     "Print": None
                 })
-                
+
             except Exception as e:
                 results.append({
                     "Rota": f"{origin}-{dest}",
-                    "Data": row['Data'],
+                    "Horário": target_time,
                     "Assentos": 0,
-                    "Detalhe": f"Erro: {str(e)}",
+                    "Status": f"Erro: {str(e)}",
                     "Print": page.screenshot()
                 })
+                
+            prog.progress((i+1)/len(df_input))
             
-            prog_bar.progress((i + 1) / len(df_input))
-
         browser.close()
-        status.success("Finalizado!")
+        status.success("Concluído!")
         return results
 
 # --- INTERFACE ---
-st.title("✈️ Scanner de Disponibilidade (Por Rota)")
-st.markdown("Verifica a disponibilidade do **primeiro/melhor voo** disponível na rota.")
+st.title("👁️ Scanner Visual (Busca por Horário)")
+st.markdown("Use o **Horário de Partida** exatamente como aparece no Google (ex: `11:30 PM`) para identificar o voo.")
 
 c1, c2 = st.columns(2)
 max_pax = c1.slider("Max Passageiros", 1, 9, 9)
 
-# Tabela simplificada (Sem número de voo)
-default = [{"Origem": "GRU", "Destino": "MIA", "Data": datetime(2026, 1, 17), "Classe": "Econômica"}]
+# Tabela de Entrada
+default = [{"Origem": "GRU", "Destino": "MIA", "Data": datetime(2026, 1, 17), "Horário": "11:30 PM", "Classe": "Econômica"}]
 df = st.data_editor(default, num_rows="dynamic", width="stretch", column_config={
     "Data": st.column_config.DateColumn(format="DD/MM/YYYY"),
+    "Horário": st.column_config.TextColumn(help="Copie do site, ex: 11:30 PM ou 23:30"),
     "Classe": st.column_config.SelectboxColumn(options=["Econômica", "Executiva", "Primeira"])
 })
 
-if st.button("🚀 Verificar Disponibilidade", type="primary", use_container_width=True):
+if st.button("🚀 Verificar Assentos", type="primary", use_container_width=True):
     if len(df) > 0:
-        data = scan_routes(pd.DataFrame(df), max_pax)
+        data = scan_visual(pd.DataFrame(df), max_pax)
         
         st.divider()
-        st.subheader("Resultados")
-        
         for res in data:
             with st.container(border=True):
-                cols = st.columns([2, 1, 3])
-                cols[0].metric(res['Rota'], res['Data'].strftime('%d/%m/%Y'))
+                col1, col2, col3 = st.columns([2, 1, 2])
+                col1.metric("Voo", f"{res['Rota']} ({res['Horário']})")
                 
-                cor = "normal" if res['Assentos'] > 0 else "off"
-                cols[1].metric("Assentos", res['Assentos'], delta_color=cor)
-                
-                cols[2].caption(f"ℹ️ {res['Detalhe']}")
+                color = "normal" if res['Assentos'] > 0 else "off"
+                col2.metric("Assentos", res['Assentos'], delta=res['Status'], delta_color=color)
                 
                 if res['Assentos'] == 0 and res['Print']:
-                    st.image(res['Print'], caption="Erro na tela", width=500)
+                    st.image(res['Print'], caption="Tela do Erro", width=500)
     else:
         st.warning("Preencha a tabela.")
