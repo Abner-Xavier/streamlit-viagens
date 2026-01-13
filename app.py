@@ -5,12 +5,13 @@ import time
 import re
 import subprocess
 import io
+import os
 from datetime import datetime
 
 # --- CONFIGURAÇÃO ---
 st.set_page_config(page_title="Scanner Master - Google Flights", page_icon="✈️", layout="wide")
 
-# --- INSTALAÇÃO ---
+# --- INSTALAÇÃO AUTOMÁTICA ---
 def install_playwright():
     if 'playwright_installed' not in st.session_state:
         try:
@@ -24,24 +25,20 @@ install_playwright()
 # --- AUXILIARES ---
 def parse_text(text, year):
     flights = []
-    # Regex flexível para capturar formato Seat Counts ou texto livre
-    # Procura: AA 930 ... GRU-MIA ... Jan 17
     lines = text.strip().split('\n')
     for line in lines:
         try:
-            # Tenta extrair número do voo (Letras + Numeros)
+            # Regex ajustado para capturar padrões variados
             flight_match = re.search(r"([A-Z0-9]{2})\s?(\d{2,4})", line)
-            # Tenta extrair rota (AAA-BBB)
             route_match = re.search(r"([A-Z]{3})-([A-Z]{3})", line)
-            # Tenta extrair data (Jan 17)
             date_match = re.search(r"([A-Za-z]{3}\s\d{1,2})", line)
             
             if flight_match and route_match and date_match:
                 date_obj = datetime.strptime(f"{date_match.group(1)} {year}", "%b %d %Y")
                 flights.append({
-                    "Voo Completo": f"{flight_match.group(1)} {flight_match.group(2)}", # Ex: AA 930
-                    "Numero": flight_match.group(2), # Ex: 930
-                    "Cia": flight_match.group(1), # Ex: AA
+                    "Voo Completo": f"{flight_match.group(1)} {flight_match.group(2)}",
+                    "Numero": flight_match.group(2),
+                    "Cia": flight_match.group(1),
                     "Origem": route_match.group(1),
                     "Destino": route_match.group(2),
                     "Data": date_obj.date()
@@ -66,12 +63,25 @@ class FlightBot:
 
     def start(self):
         p = sync_playwright().start()
-        self.browser = p.chromium.launch(
-            headless=self.headless,
-            args=["--disable-blink-features=AutomationControlled"]
-        )
+        
+        # Tenta lançar o navegador. Se falhar por falta de monitor (XServer), força headless.
+        try:
+            self.browser = p.chromium.launch(
+                headless=self.headless,
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"]
+            )
+        except Exception as e:
+            if "Missing X server" in str(e) or not self.headless:
+                print("⚠️ Ambiente sem monitor detectado. Forçando modo Headless.")
+                self.browser = p.chromium.launch(
+                    headless=True, # Força invisível para não quebrar no servidor
+                    args=["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+                )
+            else:
+                raise e
+
         self.context = self.browser.new_context(
-            viewport={"width": 1400, "height": 900}, # Tela grande para carregar tudo
+            viewport={"width": 1400, "height": 900},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         self.page = self.context.new_page()
@@ -86,7 +96,6 @@ class FlightBot:
             trip = "one way" if one_way else "round trip"
             cabin_map = {"Econômica": "economy", "Executiva": "business", "Primeira": "first"}
             
-            # URL Genérica da Rota (Busca ampla para garantir que o voo apareça)
             query = f"Flights from {row['Origem']} to {row['Destino']} on {date_str} {trip} {cabin_map[cabin_class]} class"
             url = f"https://www.google.com/travel/flights?q={query.replace(' ', '+')}"
             
@@ -95,84 +104,78 @@ class FlightBot:
             except: pass
             
             self.page.wait_for_load_state("networkidle")
-            time.sleep(3) # Tempo para renderizar lista
+            time.sleep(3)
 
-            # 2. ENCONTRAR O CARTÃO DO VOO (Estratégia Relativa)
-            # Pegamos todos os elementos de lista que parecem cartões de voo
+            # 2. ENCONTRAR O CARTÃO DO VOO
             flight_cards = self.page.locator("li, div[role='listitem']").all()
             
             target_card = None
             extracted_info = "N/A"
             
-            # Itera sobre todos os voos da tela para achar o AA 930
+            # Itera para achar Cia e Numero no mesmo card
             for card in flight_cards:
                 text = card.inner_text()
-                # Verifica se o numero (930) e a Cia (AA) estão no texto desse cartão
                 if row['Numero'] in text and row['Cia'] in text:
                     target_card = card
-                    # Extrai infos visuais para confirmação
-                    try:
-                        # Tenta pegar horário/preço usando estrutura genérica
-                        times = card.locator("span[aria-label*='Departure'], span[aria-label*='Partida']").first.inner_text() 
-                        price = card.locator("div[class*='BVJ']").last.inner_text() # Classes mudam, mas tentar pegar último texto
-                        extracted_info = f"Card encontrado. Texto parcial: {text[:50]}..."
-                    except:
-                        extracted_info = "Card encontrado (dados visuais não extraídos)"
+                    extracted_info = "Card encontrado"
                     break
             
             if not target_card:
-                return 0, "Voo não encontrado na lista (Cia/Num não batem)", self.page.screenshot(), "---"
+                return 0, "Voo não encontrado (Cia/Num não batem)", self.page.screenshot(), "---"
 
             # 3. TESTAR PASSAGEIROS
             confirmed_seats = 1
             
             for n in range(2, max_pax + 1):
-                # Menu Pax (Topo da página)
+                # Menu Pax
                 btn_pax = self.page.locator("div[jsaction*='click']").filter(has_text=re.compile(r"^\d+$|passenger|passageiro", re.I)).first
                 if not btn_pax.is_visible():
                      btn_pax = self.page.get_by_role("button", name=re.compile(r"passenger|passageiro", re.I)).first
                 
-                btn_pax.click()
-                time.sleep(0.5)
-                
-                # Botão +
-                self.page.locator("button[aria-label*='Add'], button[aria-label*='Adicionar']").first.click()
-                
-                # Botão Done
-                self.page.get_by_role("button", name=re.compile(r"Done|Concluído", re.I)).first.click()
-                
-                # Espera Loading
-                time.sleep(1.5)
-                self.page.wait_for_load_state("domcontentloaded")
-                
-                # 4. RE-VERIFICAÇÃO
-                # O Google recria o DOM. Precisamos buscar o cartão de novo.
-                found_again = False
-                cards_now = self.page.locator("li, div[role='listitem']").all()
-                for c in cards_now:
-                    t = c.inner_text()
-                    # Verifica se o voo AA 930 AINDA está na tela
-                    if row['Numero'] in t and row['Cia'] in t:
-                        found_again = True
-                        break
-                
-                if found_again:
-                    confirmed_seats = n
-                else:
-                    return confirmed_seats, "Limite Atingido (Voo sumiu)", None, extracted_info
+                if btn_pax.is_visible():
+                    btn_pax.click()
+                    time.sleep(0.5)
+                    # Add
+                    self.page.locator("button[aria-label*='Add'], button[aria-label*='Adicionar']").first.click()
+                    # Done
+                    self.page.get_by_role("button", name=re.compile(r"Done|Concluído", re.I)).first.click()
+                    
+                    time.sleep(1.5)
+                    self.page.wait_for_load_state("domcontentloaded")
+                    
+                    # Re-verificação
+                    found_again = False
+                    cards_now = self.page.locator("li, div[role='listitem']").all()
+                    for c in cards_now:
+                        t = c.inner_text()
+                        if row['Numero'] in t and row['Cia'] in t:
+                            found_again = True
+                            break
+                    
+                    if found_again:
+                        confirmed_seats = n
+                    else:
+                        return confirmed_seats, "Limite Atingido (Voo sumiu)", None, extracted_info
             
             return confirmed_seats, "Capacidade Máxima", None, extracted_info
 
         except Exception as e:
-            return -1, f"Erro: {str(e)}", self.page.screenshot(), "Erro"
+            # Tenta tirar screenshot se a página estiver aberta
+            img = None
+            try: img = self.page.screenshot()
+            except: pass
+            return -1, f"Erro: {str(e)}", img, "Erro"
 
 # --- INTERFACE ---
-st.title("✈️ Scanner de Capacidade (Correção de Detecção)")
-st.markdown("Este robô lê a lista inteira de voos para encontrar o seu, mesmo se o texto estiver quebrado.")
+st.title("✈️ Scanner de Capacidade (Cloud Ready)")
+st.markdown("Este robô foi ajustado para rodar no Streamlit Cloud sem erros de display.")
 
 with st.sidebar:
     st.header("Configurações")
-    show_browser = st.checkbox("Ver Navegador (Headless False)", value=True, help="Essencial para debug!")
+    
+    # Checkbox ajustado: Se estiver na nuvem, ignoramos o pedido de ver o browser
+    show_browser = st.checkbox("Ver Navegador (Apenas Local)", value=False, help="Marque APENAS se estiver rodando no seu computador. Na nuvem, isso será ignorado.")
+    
     cabin = st.selectbox("Classe", ["Econômica", "Executiva", "Primeira"], index=2)
     max_pax = st.slider("Max Passageiros", 1, 9, 9)
     year_ref = st.number_input("Ano", 2025, 2030, 2026)
@@ -190,14 +193,15 @@ with t1:
 
 with t2:
     base = df_input if not df_input.empty else pd.DataFrame([{"Voo Completo": "AA 930", "Numero": "930", "Cia": "AA", "Origem": "GRU", "Destino": "MIA", "Data": datetime(2026, 1, 17)}])
-    edited = st.data_editor(base, num_rows="dynamic", use_container_width=True, column_config={"Data": st.column_config.DateColumn(format="DD/MM/YYYY")})
+    edited = st.data_editor(base, num_rows="dynamic", width="stretch", column_config={"Data": st.column_config.DateColumn(format="DD/MM/YYYY")})
     if not edited.empty:
         df_input = edited
 
-if st.button("🚀 Iniciar Varredura", type="primary"):
+if st.button("🚀 Iniciar Varredura", type="primary", use_container_width=True):
     if df_input.empty:
         st.error("Adicione voos.")
     else:
+        # Inicia Bot (Se show_browser for True mas estiver no servidor, o try/catch na classe resolve)
         bot = FlightBot(headless=not show_browser)
         results = []
         status = st.status("Iniciando...", expanded=True)
@@ -228,10 +232,23 @@ if st.button("🚀 Iniciar Varredura", type="primary"):
             
             # Exibir e Baixar
             res_df = pd.DataFrame(results)
-            st.dataframe(res_df.style.map(lambda x: 'background-color: #ffcdd2' if x==0 else 'background-color: #c8e6c9', subset=['Assentos']), use_container_width=True)
             
-            st.download_button("📥 Baixar Excel", to_excel(res_df), "resultado_voos.xlsx")
+            # Correção do use_container_width aqui:
+            st.dataframe(
+                res_df.style.map(lambda x: 'background-color: #ffcdd2' if x==0 else 'background-color: #c8e6c9', subset=['Assentos']), 
+                width="stretch"
+            )
+            
+            st.download_button(
+                "📥 Baixar Excel", 
+                to_excel(res_df), 
+                "resultado_voos.xlsx", 
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
+                use_container_width=True
+            )
             
         except Exception as e:
             bot.stop()
             st.error(f"Erro: {e}")
+            if "Missing X server" in str(e):
+                st.warning("Dica: Desmarque a opção 'Ver Navegador' quando rodar no Streamlit Cloud.")
