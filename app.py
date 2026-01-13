@@ -1,8 +1,14 @@
 import streamlit as st
-import pandas as pd
-from FlightRadar24 import FlightRadar24API
+import subprocess
+import sys
 
-# Inicializa o acesso aos dados reais
+# Comando para instalar a biblioteca caso o requirements falhe
+try:
+    from FlightRadar24 import FlightRadar24API
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "FlightRadar24"])
+    from FlightRadar24 import FlightRadar24API
+
 fr_api = FlightRadar24API()
 
 st.set_page_config(page_title="Validador Real-Time", page_icon="✈️")
