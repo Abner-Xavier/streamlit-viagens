@@ -8,7 +8,7 @@ import io
 from datetime import datetime
 
 # --- CONFIGURAÇÃO ---
-st.set_page_config(page_title="Scanner Debugger", page_icon="🕵️", layout="wide")
+st.set_page_config(page_title="Scanner de Rota (Sem Voo)", page_icon="✈️", layout="wide")
 
 # --- INSTALAÇÃO ---
 def install_playwright():
@@ -21,180 +21,156 @@ def install_playwright():
 
 install_playwright()
 
-# --- MOTOR DE BUSCA (COM SNAPSHOT) ---
-def get_available_seats(flights_df, max_pax_check):
+# --- MOTOR DE BUSCA (FOCADO NA ROTA) ---
+def scan_routes(df_input, max_pax):
     results = []
     
     with sync_playwright() as p:
+        # Modo invisível (Headless) para servidor
         browser = p.chromium.launch(
-            headless=True, # Mantém invisível para não dar erro no servidor
-            args=[
-                "--disable-blink-features=AutomationControlled", 
-                "--no-sandbox", 
-                "--disable-dev-shm-usage",
-                "--disable-gpu"
-            ]
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"]
         )
-        # Contexto com tamanho de tela grande para garantir que elementos carreguem
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={"width": 1920, "height": 1080}
+        # Contexto mobile/tablet as vezes carrega mais rápido, mas vamos usar desktop padrão
+        page = browser.new_page(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            viewport={"width": 1366, "height": 768}
         )
-        page = context.new_page()
         
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        total = len(flights_df)
+        prog_bar = st.progress(0)
+        status = st.empty()
         
-        for index, row in flights_df.iterrows():
-            row_result = row.to_dict()
-            row_result["Debug_Image"] = None # Coluna para guardar a foto do erro
+        for i, row in df_input.iterrows():
+            # Prepara dados
+            origin, dest = row['Origem'].upper(), row['Destino'].upper()
+            date_str = row['Data'].strftime("%Y-%m-%d")
+            
+            # Mapeamento de classe
+            cabin_map = {"Econômica": "economy", "Executiva": "business", "Primeira": "first"}
+            cabin = cabin_map.get(row['Classe'], "economy")
+            
+            status.markdown(f"🔎 Analisando rota **{origin} ➔ {dest}** em {date_str}...")
+            
+            # URL de busca
+            query = f"Flights from {origin} to {dest} on {date_str} one way {cabin} class"
+            url = f"https://www.google.com/travel/flights?q={query.replace(' ', '+')}"
             
             try:
-                # Dados
-                flight_raw = str(row['Voo']).upper().strip()
-                # Tenta pegar apenas numeros (ex: 930)
-                flight_digits = "".join(re.findall(r"\d+", flight_raw))
-                
-                origin, dest = row['Origem'], row['Destino']
-                date_str = row['Data'].strftime("%Y-%m-%d")
-                
-                cabin_map = {"Econômica": "economy", "Executiva": "business", "Primeira": "first"}
-                cabin_query = cabin_map.get(row['Classe'], "economy")
-                
-                status_text.markdown(f"📸 Analisando **{flight_raw}** ({origin}-{dest})...")
-                
-                # URL
-                query = f"Flights from {origin} to {dest} on {date_str} one way {cabin_query} class"
-                url = f"https://www.google.com/travel/flights?q={query.replace(' ', '+')}"
-                
                 page.goto(url, timeout=45000)
                 
-                # Tenta limpar popups
-                try: page.get_by_role("button", name=re.compile(r"Reject|Aceitar|Concordo", re.I)).first.click(timeout=3000)
+                # Fecha popups
+                try: page.get_by_role("button", name=re.compile(r"Reject|Aceitar", re.I)).first.click(timeout=3000)
                 except: pass
                 
-                # Espera extra para renderização visual
                 page.wait_for_load_state("networkidle")
-                time.sleep(2) 
                 
-                # --- ESTRATÉGIA DE BUSCA ---
-                cards = page.locator("li, div[role='listitem']").all()
-                flight_found = False
-                target_seats = 0
+                # --- AQUI ESTÁ A MUDANÇA: PEGA O PRIMEIRO VOO ---
+                # Não procuramos por "AA 930". Pegamos o primeiro card da lista.
+                first_card = page.locator("li, div[role='listitem']").first
                 
-                # 1. Busca Estrita (AA + 930)
-                for card in cards:
-                    txt = card.inner_text()
-                    if flight_digits in txt:
-                        # Achamos o cartão que tem o número "930"
-                        flight_found = True
-                        target_seats = 1 # Começa com 1 confirmado
-                        break
-                
-                if not flight_found:
-                    # SE DER ZERO: TIRA FOTO!
-                    row_result["Assentos"] = 0
-                    row_result["Status"] = "Voo não encontrado na lista"
-                    row_result["Debug_Image"] = page.screenshot() # Salva o print
-                    results.append(row_result)
+                if not first_card.is_visible():
+                    results.append({
+                        "Rota": f"{origin}-{dest}",
+                        "Data": row['Data'],
+                        "Assentos": 0,
+                        "Detalhe": "Nenhum voo encontrado nesta data",
+                        "Print": page.screenshot()
+                    })
                     continue
 
-                # 2. Loop de Passageiros (se achou o voo)
-                for n in range(2, max_pax_check + 1):
-                    # Abre menu
+                # Extrai informações do voo encontrado para mostrar ao usuário
+                try:
+                    # Tenta ler o horário e a cia aérea para confirmar qual voo pegou
+                    card_text = first_card.inner_text().split('\n')
+                    flight_info = f"{card_text[0]} - {card_text[1]}" # Ex: 8:45 PM - American
+                except:
+                    flight_info = "Primeiro voo da lista"
+
+                # TESTE DE CAPACIDADE
+                available = 1
+                
+                for n in range(2, max_pax + 1):
+                    # Menu Pax
                     btn_pax = page.locator("div[jsaction*='click']").filter(has_text=re.compile(r"^\d+$|passenger", re.I)).first
                     if not btn_pax.is_visible(): 
-                        # Fallback
-                        btn_pax = page.get_by_role("button", name=re.compile(r"passenger", re.I)).first
+                         btn_pax = page.get_by_role("button", name=re.compile(r"passenger", re.I)).first
                     
                     if btn_pax.is_visible():
                         btn_pax.click()
-                        time.sleep(0.5)
-                        
-                        # Add pax
+                        # Add
                         page.locator("button[aria-label*='Add'], button[aria-label*='Adicionar']").first.click()
-                        
                         # Done
                         page.get_by_role("button", name=re.compile(r"Done|Concluído", re.I)).first.click()
                         
-                        time.sleep(1.5)
-                        page.wait_for_load_state("domcontentloaded")
+                        time.sleep(1.2) # Breve pausa para reload
                         
-                        # Re-verifica se o numero "930" ainda está na tela
-                        still_visible = False
-                        new_cards = page.locator("li, div[role='listitem']").all()
-                        for c in new_cards:
-                            if flight_digits in c.inner_text():
-                                still_visible = True
-                                break
+                        # Verifica se o PRIMEIRO card ainda existe/é visível
+                        # Nota: Se o voo lotar, ele some ou muda de posição. 
+                        # Assumimos que se o primeiro card mudar drasticamente ou sumir, atingiu o limite.
+                        # Mas o Google costuma apenas remover o voo da lista se não tiver vaga.
                         
-                        if still_visible:
-                            target_seats = n
+                        if page.locator("li, div[role='listitem']").first.is_visible():
+                            available = n
                         else:
-                            break # Limite atingido
+                            break
+                    else:
+                        break
                 
-                row_result["Assentos"] = target_seats
-                row_result["Status"] = "Disponível" if target_seats > 0 else "Indisponível"
+                results.append({
+                    "Rota": f"{origin}-{dest}",
+                    "Data": row['Data'],
+                    "Assentos": available,
+                    "Detalhe": f"Voo detectado: {flight_info}",
+                    "Print": None
+                })
                 
-                # Se mesmo depois de tudo deu 0 ou erro, tira foto
-                if target_seats == 0:
-                    row_result["Debug_Image"] = page.screenshot()
-
-                results.append(row_result)
-
             except Exception as e:
-                # Erro técnico? Tira foto também
-                try: img = page.screenshot()
-                except: img = None
-                row_result["Assentos"] = 0
-                row_result["Status"] = f"Erro: {str(e)}"
-                row_result["Debug_Image"] = img
-                results.append(row_result)
+                results.append({
+                    "Rota": f"{origin}-{dest}",
+                    "Data": row['Data'],
+                    "Assentos": 0,
+                    "Detalhe": f"Erro: {str(e)}",
+                    "Print": page.screenshot()
+                })
             
-            progress_bar.progress((index + 1) / total)
+            prog_bar.progress((i + 1) / len(df_input))
 
         browser.close()
-        status_text.success("Processado!")
+        status.success("Finalizado!")
         return results
 
 # --- INTERFACE ---
-st.title("🕵️ Scanner com Diagnóstico (Debug)")
-st.markdown("Se o resultado for 0, mostrarei uma **foto** do que o robô viu.")
+st.title("✈️ Scanner de Disponibilidade (Por Rota)")
+st.markdown("Verifica a disponibilidade do **primeiro/melhor voo** disponível na rota.")
 
-# Inputs
 c1, c2 = st.columns(2)
 max_pax = c1.slider("Max Passageiros", 1, 9, 9)
 
-# Tabela Input
-default_data = [{"Voo": "AA 930", "Origem": "GRU", "Destino": "MIA", "Data": datetime(2026, 1, 17), "Classe": "Econômica"}]
-df_input = st.data_editor(default_data, num_rows="dynamic", width="stretch", column_config={
-    "Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
-    "Classe": st.column_config.SelectboxColumn("Classe", options=["Econômica", "Executiva", "Primeira"])
+# Tabela simplificada (Sem número de voo)
+default = [{"Origem": "GRU", "Destino": "MIA", "Data": datetime(2026, 1, 17), "Classe": "Econômica"}]
+df = st.data_editor(default, num_rows="dynamic", width="stretch", column_config={
+    "Data": st.column_config.DateColumn(format="DD/MM/YYYY"),
+    "Classe": st.column_config.SelectboxColumn(options=["Econômica", "Executiva", "Primeira"])
 })
 
-if st.button("🚀 Rodar Scanner", type="primary", use_container_width=True):
-    if len(df_input) > 0:
-        results_data = get_available_seats(pd.DataFrame(df_input), max_pax)
+if st.button("🚀 Verificar Disponibilidade", type="primary", use_container_width=True):
+    if len(df) > 0:
+        data = scan_routes(pd.DataFrame(df), max_pax)
         
         st.divider()
         st.subheader("Resultados")
         
-        for res in results_data:
-            # Layout do card de resultado
+        for res in data:
             with st.container(border=True):
-                cols = st.columns([1, 1, 2])
-                cols[0].metric("Voo", res['Voo'])
+                cols = st.columns([2, 1, 3])
+                cols[0].metric(res['Rota'], res['Data'].strftime('%d/%m/%Y'))
                 
-                color = "normal" if res['Assentos'] > 0 else "off"
-                cols[1].metric("Assentos", res['Assentos'], delta=res['Status'], delta_color=color)
+                cor = "normal" if res['Assentos'] > 0 else "off"
+                cols[1].metric("Assentos", res['Assentos'], delta_color=cor)
                 
-                # SE TIVER IMAGEM DE DEBUG (ERRO/ZERO), MOSTRA
-                if res['Debug_Image']:
-                    st.warning(f"⚠️ Alerta: O robô não encontrou assentos. Veja o que ele viu na tela para o voo {res['Voo']}:")
-                    st.image(res['Debug_Image'], caption="Visão do Robô (Screenshot)", width=700)
-                else:
-                    st.success("Leitura realizada com sucesso.")
-
+                cols[2].caption(f"ℹ️ {res['Detalhe']}")
+                
+                if res['Assentos'] == 0 and res['Print']:
+                    st.image(res['Print'], caption="Erro na tela", width=500)
     else:
-        st.error("Adicione voos.")
+        st.warning("Preencha a tabela.")
