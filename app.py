@@ -1,204 +1,216 @@
 import streamlit as st
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+from playwright.sync_api import sync_playwright
+import pandas as pd
 import time
 import re
 import subprocess
 from datetime import datetime
 
-# --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Scanner de Voo Específico", page_icon="✈️", layout="centered")
+# --- CONFIGURAÇÃO ---
+st.set_page_config(page_title="Scanner de Voos em Lote", page_icon="✈️", layout="wide")
 
-# --- INSTALAÇÃO AUTOMÁTICA ---
+# --- INSTALAÇÃO ---
 def install_playwright():
     if 'playwright_installed' not in st.session_state:
         try:
             subprocess.run(["playwright", "install", "chromium"], check=True)
             st.session_state['playwright_installed'] = True
-        except Exception as e:
-            st.error(f"Erro na instalação do navegador: {e}")
+        except Exception:
+            pass
 
-# --- CLASSE DO ROBÔ ---
-class FlightScanner:
+# --- FUNÇÃO DE PARSING (EXTRAIR DADOS DO TEXTO) ---
+def parse_flight_text(text_input, year):
+    flights = []
+    # Regex para capturar: (ORIGEM)-(DESTINO) ... (CIA NUMERO) ... (MES DIA)
+    # Ex: EZE-JFK ... AA 954 ... Jan 17
+    regex_pattern = r"([A-Z]{3})-([A-Z]{3}).*?([A-Z0-9]{2}\s?\d{1,4}).*?([A-Za-z]{3}\s\d{1,2})"
+    
+    lines = text_input.strip().split('\n')
+    
+    for line in lines:
+        match = re.search(regex_pattern, line)
+        if match:
+            origin, dest, flight_num, date_part = match.groups()
+            
+            # Converter data textual (Jan 17) para YYYY-MM-DD
+            try:
+                date_obj = datetime.strptime(f"{date_part} {year}", "%b %d %Y")
+                date_formatted = date_obj.strftime("%Y-%m-%d")
+                
+                flights.append({
+                    "Origem": origin,
+                    "Destino": dest,
+                    "Voo": flight_num.strip(),
+                    "Data": date_formatted,
+                    "Texto Original": line
+                })
+            except ValueError:
+                continue
+                
+    return pd.DataFrame(flights)
+
+# --- CLASSE DO SCANNER ---
+class BatchScanner:
     def __init__(self):
+        self.playwright = None
         self.browser = None
-        self.context = None
         self.page = None
 
-    def start_browser(self):
-        playwright = sync_playwright().start()
-        self.browser = playwright.chromium.launch(
-            headless=True, 
+    def start(self):
+        self.playwright = sync_playwright().start()
+        self.browser = self.playwright.chromium.launch(
+            headless=True,
             args=["--disable-blink-features=AutomationControlled"]
         )
         self.context = self.browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800} # Resolução um pouco maior
+            viewport={"width": 1280, "height": 800}
         )
         self.page = self.context.new_page()
 
-    def close(self):
+    def stop(self):
         if self.browser:
             self.browser.close()
+        if self.playwright:
+            self.playwright.stop()
 
-    def check_specific_flight(self, origin, dest, date, flight_num, cabin, trip_type_str, max_pax, status_log):
-        screenshot_bytes = None
+    def check_flight(self, row, cabin_class, max_pax, one_way):
         try:
-            self.start_browser()
+            origin = row['Origem']
+            dest = row['Destino']
+            date = row['Data']
+            flight_num = row['Voo']
             
-            # Formata a classe
-            cabin_map = {
-                "Econômica": "economy",
-                "Econômica Premium": "premium+economy",
-                "Executiva": "business",
-                "Primeira Classe": "first"
-            }
-            cabin_query = cabin_map.get(cabin, "economy")
-            
-            # --- CORREÇÃO PRINCIPAL: Adiciona 'one way' se necessário ---
-            trip_mod = "one way" if trip_type_str == "Só Ida" else "round trip"
+            # Mapeamento de classe
+            cabin_map = {"Econômica": "economy", "Executiva": "business", "Primeira": "first"}
+            cabin_query = cabin_map.get(cabin_class, "economy")
+            trip_type = "one way" if one_way else "round trip"
 
-            # Monta a URL de busca em linguagem natural
-            # Ex: "Flights from GRU to JFK on 2026-01-17 one way first class"
-            search_query = f"Flights from {origin} to {dest} on {date} {trip_mod} {cabin_query} class"
-            encoded_query = search_query.replace(" ", "+")
-            url = f"https://www.google.com/travel/flights?q={encoded_query}"
+            # URL
+            query = f"Flights from {origin} to {dest} on {date} {trip_type} {cabin_query} class"
+            url = f"https://www.google.com/travel/flights?q={query.replace(' ', '+')}"
             
-            status_log.write(f"🌍 Acessando busca: {origin} ➔ {dest} ({trip_type_str})")
-            self.page.goto(url, timeout=60000)
+            self.page.goto(url, timeout=45000)
             
-            # Fecha cookies/popups
+            # Tenta fechar cookies
             try:
-                self.page.get_by_role("button", name=re.compile(r"Reject|Rejeitar|Accept|Aceitar|Concordo", re.I)).first.click(timeout=4000)
+                self.page.get_by_role("button", name=re.compile(r"Reject|Rejeitar|Accept|Aceitar", re.I)).first.click(timeout=3000)
             except:
                 pass
-
+            
             self.page.wait_for_load_state("networkidle")
-            
-            # --- LÓGICA DE REGEX DO VOO ---
-            # Remove espaços do input (ex: " AA 954 ") -> "AA954"
-            clean_flight_num = flight_num.replace(" ", "").strip()
-            # Separa letras e números para criar regex flexível (ex: "AA" e "954")
-            letters = "".join(re.findall(r"[a-zA-Z]+", clean_flight_num))
-            numbers = "".join(re.findall(r"\d+", clean_flight_num))
-            # Regex aceita: "AA954", "AA 954", "AA  954"
-            regex_pattern = f"{letters}\\s*{numbers}"
-            
-            status_log.write(f"🔎 Procurando voo **{letters} {numbers}** na lista...")
-            
-            # Tenta encontrar o card do voo
-            # Procura em listitems (estrutura padrão) e também divs genéricas que contenham o texto
-            flight_locator = self.page.locator("li, div[role='listitem']").filter(has_text=re.compile(regex_pattern, re.I)).first
-            
-            if not flight_locator.is_visible():
-                # --- CAPTURA DE TELA EM CASO DE ERRO ---
-                screenshot_bytes = self.page.screenshot(full_page=False)
-                return 0, f"Voo {flight_num} não encontrado na página.", url, screenshot_bytes
 
-            confirmed_seats = 1
+            # Regex para achar o voo na página
+            clean_num = flight_num.replace(" ", "")
+            letters = "".join(re.findall(r"[a-zA-Z]+", clean_num))
+            numbers = "".join(re.findall(r"\d+", clean_num))
+            flight_regex = re.compile(f"{letters}\\s*{numbers}", re.I)
+
+            # Verifica se voo existe
+            if not self.page.locator("li, div[role='listitem']").filter(has_text=flight_regex).first.is_visible():
+                return 0, "Voo não encontrado"
+
+            confirmed = 1
             
-            # Loop de teste de assentos
+            # Loop de disponibilidade
             for n in range(2, max_pax + 1):
-                status_log.write(f"🔢 Testando **{n}** passageiros...")
-                
-                # Clica no seletor de passageiros
-                btn_pax = self.page.locator("div[jsaction*='click']").filter(has_text=re.compile(r"^\d+$|passenger|passageiro", re.I)).first
-                # Fallback
-                if not btn_pax.is_visible():
-                     btn_pax = self.page.get_by_role("button", name=re.compile(r"passenger|passageiro", re.I)).first
-                
+                # Abre Pax
+                btn_pax = self.page.locator("div[jsaction*='click']").filter(has_text=re.compile(r"^\d+$|passenger", re.I)).first
+                if not btn_pax.is_visible(): break
                 btn_pax.click()
                 
-                # Adiciona adulto
-                btn_add = self.page.locator("button[aria-label*='Add'], button[aria-label*='Adicionar']").first
-                btn_add.click()
+                # Add Adult
+                self.page.locator("button[aria-label*='Add'], button[aria-label*='Adicionar']").first.click()
                 
-                # Conclui
-                btn_done = self.page.get_by_role("button", name=re.compile(r"Done|Concluído|Ok", re.I)).first
-                btn_done.click()
+                # Done
+                self.page.get_by_role("button", name=re.compile(r"Done|Concluído", re.I)).first.click()
                 
-                # Aguarda atualização
-                time.sleep(1.5) 
+                # Wait
+                time.sleep(1)
                 self.page.wait_for_load_state("domcontentloaded")
                 
-                # Verifica se o voo ESPECÍFICO continua lá
-                flight_locator = self.page.locator("li, div[role='listitem']").filter(has_text=re.compile(regex_pattern, re.I)).first
-                
-                if flight_locator.is_visible():
-                    confirmed_seats = n
+                # Check Visibility
+                if self.page.locator("li, div[role='listitem']").filter(has_text=flight_regex).first.is_visible():
+                    confirmed = n
                 else:
-                    status_log.warning(f"🚫 Voo sumiu com {n} passageiros.")
-                    return confirmed_seats, "Limite atingido", url, None
+                    return confirmed, "Limite atingido"
             
-            return confirmed_seats, "Capacidade máxima verificada", url, None
+            return confirmed, "Capacidade máxima"
 
-        except PlaywrightTimeout:
-            # Tenta tirar print mesmo no timeout
-            try: screenshot_bytes = self.page.screenshot()
-            except: pass
-            return -1, "Tempo esgotado (Timeout).", "", screenshot_bytes
         except Exception as e:
-            return -1, f"Erro: {str(e)}", "", None
-        finally:
-            self.close()
+            return -1, f"Erro: {str(e)}"
 
 # --- INTERFACE ---
-st.title("✈️ Scanner de Capacidade de Voo")
-st.markdown("Verifique disponibilidade real de assentos.")
+st.title("✈️ Scanner de Voos em Lote")
+st.markdown("Cole sua lista de voos abaixo para verificar a disponibilidade de todos de uma vez.")
 
 install_playwright()
 
-with st.form("flight_form"):
-    col1, col2 = st.columns(2)
-    with col1:
-        origin = st.text_input("Origem (IATA)", "EZE", max_chars=3).upper()
-        flight_num = st.text_input("Número do Voo", "AA 954", help="Ex: TP104, AA954")
-        cabin_class = st.selectbox("Classe", ["Econômica", "Econômica Premium", "Executiva", "Primeira Classe"], index=3)
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    raw_text = st.text_area(
+        "Cole a lista de voos aqui:", 
+        height=200,
+        placeholder="Seat Counts EZE-JFK Dep 8:45PM AA 954 – Jan 17\nSeat Counts GRU-MIA Dep 11:30PM AA 930 – Jan 17",
+        help="O sistema detecta automaticamente o formato Origem-Destino, Voo e Data."
+    )
+
+with col2:
+    target_year = st.number_input("Ano da Viagem", min_value=2024, max_value=2030, value=2026)
+    cabin = st.selectbox("Classe", ["Econômica", "Executiva", "Primeira"])
+    max_pax = st.slider("Max Passageiros", 1, 9, 9)
+    is_one_way = st.checkbox("Apenas Ida (One Way)", value=True)
+
+# Parse e Preview
+if raw_text:
+    df_flights = parse_flight_text(raw_text, target_year)
     
-    with col2:
-        dest = st.text_input("Destino (IATA)", "JFK", max_chars=3).upper()
-        date_input = st.date_input("Data da Viagem", min_value=datetime.today())
-        # NOVA OPÇÃO AQUI
-        trip_type = st.radio("Tipo de Viagem", ["Só Ida", "Ida e Volta"], horizontal=True)
-
-    max_pax = st.slider("Testar até quantos passageiros?", 1, 9, 9)
-    submitted = st.form_submit_button("🚀 Verificar Disponibilidade", use_container_width=True)
-
-if submitted:
-    if not origin or not dest or not flight_num:
-        st.error("Preencha todos os campos obrigatórios.")
-    else:
-        date_str = date_input.strftime("%Y-%m-%d")
-        scanner = FlightScanner()
+    if not df_flights.empty:
+        st.info(f"{len(df_flights)} voos detectados.")
+        st.dataframe(df_flights[["Origem", "Destino", "Voo", "Data"]], use_container_width=True)
         
-        with st.status("Iniciando varredura...", expanded=True) as status:
-            seats, msg, final_url, err_img = scanner.check_specific_flight(
-                origin, dest, date_str, flight_num, cabin_class, trip_type, max_pax, status
-            )
+        if st.button("🚀 Iniciar Scanner em Lote", type="primary"):
+            scanner = BatchScanner()
+            results = []
             
-            if seats > 0:
-                status.update(label="Varredura concluída", state="complete", expanded=False)
-            else:
-                status.update(label="Voo não encontrado", state="error")
-        
-        st.divider()
-        
-        if seats <= 0:
-            st.error(msg)
-            if final_url:
-                st.markdown(f"👉 [Clique para ver a busca original no Google]({final_url})")
-            # MOSTRA O PRINT SE HOUVER ERRO
-            if err_img:
-                st.warning("O que o robô viu na tela:")
-                st.image(err_img, caption="Captura de tela do erro", use_container_width=True)
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            try:
+                scanner.start()
+                total = len(df_flights)
                 
-        else:
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Voo", flight_num)
-            c2.metric("Classe", cabin_class)
-            color = "normal" if seats >= max_pax else "off"
-            c3.metric("Assentos Disponíveis", f"{seats}", delta=msg, delta_color=color)
-            
-            if seats < max_pax:
-                st.info(f"💡 O voo desaparece dos resultados ao buscar {seats + 1} passageiros.")
-            else:
-                st.success(f"✅ O voo suporta pelo menos {seats} passageiros nesta classe.")
+                for index, row in df_flights.iterrows():
+                    status_text.write(f"⏳ Processando {index+1}/{total}: **{row['Voo']}** ({row['Origem']}-{row['Destino']})...")
+                    
+                    seats, msg = scanner.check_flight(row, cabin, max_pax, is_one_way)
+                    
+                    results.append({
+                        "Voo": row['Voo'],
+                        "Rota": f"{row['Origem']}-{row['Destino']}",
+                        "Data": row['Data'],
+                        "Assentos": seats,
+                        "Status": msg
+                    })
+                    
+                    progress_bar.progress((index + 1) / total)
+                
+                scanner.stop()
+                status_text.success("Processamento concluído!")
+                
+                # Exibe Resultados Finais
+                df_results = pd.DataFrame(results)
+                
+                # Formatação condicional (destaca voos com assentos > 0)
+                st.subheader("📊 Resultados de Disponibilidade")
+                st.dataframe(
+                    df_results.style.map(lambda x: 'color: red' if x == 0 or x == -1 else 'color: green', subset=['Assentos']),
+                    use_container_width=True
+                )
+                
+            except Exception as e:
+                st.error(f"Erro crítico: {e}")
+                scanner.stop()
+    else:
+        st.warning("Nenhum voo identificado no texto. Verifique se o formato está correto (Ex: EZE-JFK ... AA 123 ... Jan 01)")
