@@ -1,4 +1,4 @@
 streamlit
+selenium
 pandas
-FlightRadar24
-playwright
+webdriver-manager
