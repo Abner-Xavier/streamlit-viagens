@@ -1,49 +1,48 @@
 import streamlit as st
-import subprocess
-import sys
+import os
 
-# Comando para instalar a biblioteca caso o requirements falhe
+# FORÇA A INSTALAÇÃO DA BIBLIOTECA CASO ELA NÃO SEJA ENCONTRADA
 try:
     from FlightRadar24 import FlightRadar24API
 except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "FlightRadar24"])
+    os.system("pip install FlightRadar24")
     from FlightRadar24 import FlightRadar24API
 
+import pandas as pd
+
+# Inicialização da API
 fr_api = FlightRadar24API()
 
-st.set_page_config(page_title="Validador Real-Time", page_icon="✈️")
+st.set_page_config(page_title="Validador de Aeronave", page_icon="✈️")
 
 st.title("🔍 Validador de Aeronave (Real-Time)")
-st.markdown("Verifique agora qual aeronave está operando o seu voo.")
+st.markdown("Verifique o modelo e matrícula da aeronave agora.")
 
-# Entrada de dados
-numero_voo = st.text_input("Digite o número do voo (Ex: AA954):", "").upper().strip()
+# Campo de entrada
+flight_number = st.text_input("Digite o número do voo (Ex: AA954, AA930):", "").upper().strip()
 
-if st.button("Validar Aeronave"):
-    if numero_voo:
-        with st.spinner("Conectando aos radares..."):
+if st.button("Validar agora"):
+    if flight_number:
+        with st.spinner(f"Consultando radares para {flight_number}..."):
             try:
-                # Busca detalhes do voo específico
-                detalhes = fr_api.get_flight_details(numero_voo)
+                details = fr_api.get_flight_details(flight_number)
                 
-                if detalhes and 'flight' in detalhes:
-                    f = detalhes['flight']
-                    aviao = f.get('aircraft', {})
-                    modelo = aviao.get('model', {}).get('text', 'Não identificado')
-                    matricula = aviao.get('registration', 'N/A')
+                if details and 'flight' in details:
+                    f = details['flight']
+                    aircraft = f.get('aircraft', {})
+                    model = aircraft.get('model', {}).get('text', 'Não identificado')
+                    registration = aircraft.get('registration', 'N/A')
                     
-                    st.success(f"Voo {numero_voo} Localizado!")
+                    st.success(f"Voo {flight_number} Localizado!")
                     
-                    # Exibição dos dados técnicos
                     col1, col2 = st.columns(2)
-                    col1.metric("Modelo", modelo)
-                    col2.metric("Matrícula", matricula)
+                    with col1:
+                        st.metric("Modelo da Aeronave", model)
+                    with col2:
+                        st.metric("Matrícula (Tail Number)", registration)
                     
-                    # Explicação técnica para evitar divergências
-                    st.info(f"**Nota Técnica:** Para o modelo {modelo}, os assentos disponíveis seguem a malha oficial da American Airlines (Ex: 6 Executiva / 9 Econômica).")
+                    st.info(f"**Análise técnica:** Para o modelo {model}, a configuração de assentos geralmente segue o padrão da American Airlines para voos internacionais/transcontinentais.")
                 else:
-                    st.warning("Voo não encontrado no radar no momento. Certifique-se de que o voo está operando hoje.")
-            except:
-                st.error("Erro ao acessar dados em tempo real.")
-    else:
-        st.warning("Por favor, digite o número do voo.")
+                    st.warning("Voo não encontrado no radar no momento. Tente um voo que esteja no ar agora para testar.")
+            except Exception as e:
+                st.error(f"Erro na conexão: {e}")
