@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Executive Scraper (Matrix View)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #0b0f19; color: #c9d1d9; font-family: 'Segoe UI', -apple-system, sans-serif; padding: 20px; }
+        .tabela-matriz { width: 100%; border-collapse: collapse; }
+        .tabela-matriz th, .tabela-matriz td { border-bottom: 1px solid #1f2532; text-align: center; vertical-align: middle; }
+        .col-fixa { position: sticky; left: 0; background-color: #0b0f19; z-index: 10; border-right: 1px solid #1f2532; }
+        .head-fixa { position: sticky; left: 0; background-color: #0b0f19; z-index: 20; border-right: 1px solid #1f2532; }
+        .dark-input { background: #0f1422; border: 1px solid #1f2532; color: white; padding: 10px; border-radius: 6px; width: 100%; outline: none;}
+        .dark-input:focus { border-color: #58a6ff; }
+        .tab-btn { cursor: pointer; padding: 12px 24px; border-bottom: 2px solid transparent; color: #8b949e; font-weight: 500; transition: all 0.2s; }
+        .tab-btn.active { border-bottom-color: #58a6ff; color: white; font-weight: bold; background: #0f1422; }
+        ::-webkit-scrollbar { height: 12px; width: 12px; }
+        ::-webkit-scrollbar-track { background: #0b0f19; }
+        ::-webkit-scrollbar-thumb { background: #1f2532; border-radius: 6px; }
+        ::-webkit-scrollbar-thumb:hover { background: #58a6ff; }
+        #log-terminal::-webkit-scrollbar { width: 6px; }
+    </style>
+</head>
+<body>
+
+    <div class="max-w-[98%] mx-auto">
+        <h1 class="text-3xl font-bold mb-6 text-white flex items-center gap-2">
+            <span>✈️</span> Executive Scraper <span class="text-sm font-normal text-[#3fb950] ml-2">(Matrix & Custom Filters)</span>
+        </h1>
+
+        <div class="flex border-b border-[#1f2532] mb-6">
+            <div onclick="mudarModo('hotel')" id="tab-hotel" class="tab-btn active">🏨 Hotéis</div>
+            <div onclick="mudarModo('flight')" id="tab-flight" class="tab-btn">✈️ Voos (Matriz Executiva)</div>
+        </div>
+
+        <div class="bg-[#0f1422] p-6 rounded-lg border border-[#1f2532] shadow-xl">
+
+            <div id="container-hotel" class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+                <div class="md:col-span-3">
+                    <label class="block text-xs text-gray-500 mb-2 uppercase font-bold">Link do Hotel</label>
+                    <input type="text" id="url" class="dark-input" placeholder="Cole a URL...">
+                </div>
+                <div class="md:col-span-1">
+                    <label class="block text-xs text-gray-500 mb-2 uppercase font-bold">Hóspedes</label>
+                    <select id="adultos-hotel" class="dark-input">
+                        <option value="1">1 Adulto</option>
+                        <option value="2" selected>2 Adultos</option>
+                        <option value="3">3 Adultos</option>
+                        <option value="4">4 Adultos</option>
+                    </select>
+                </div>
+            </div>
+
+            <div id="container-voos" class="hidden mb-4">
+                <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4 pb-4 border-b border-[#1f2532]">
+                    <div class="md:col-span-2">
+                        <label class="block text-xs text-[#58a6ff] mb-2 uppercase font-bold">Classe (Trecho 1)</label>
+                        <select id="classe1" class="dark-input">
+                            <option value="M">Economy</option>
+                            <option value="W">Premium Economy</option>
+                            <option value="J" selected>Business Class</option>
+                            <option value="F">First Class</option>
+                        </select>
+                    </div>
+                    <div class="md:col-span-2">
+                        <label class="block text-xs text-[#e3b341] mb-2 uppercase font-bold">Classe (Trecho 2)</label>
+                        <select id="classe2" class="dark-input">
+                            <option value="M">Economy</option>
+                            <option value="W">Premium Economy</option>
+                            <option value="J">Business Class</option>
+                            <option value="F" selected>First Class</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <div>
+                        <label class="block text-xs text-[#58a6ff] mb-2 uppercase font-bold">Origem 1 (Obrigatório)</label>
+                        <input type="text" id="origem1" class="dark-input border border-[#58a6ff]/30" value="LAX">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-[#58a6ff] mb-2 uppercase font-bold">Destino 1 (Obrigatório)</label>
+                        <input type="text" id="destino1" class="dark-input border border-[#58a6ff]/30" value="MIA">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-[#e3b341] mb-2 uppercase font-bold">Origem 2 (Opcional)</label>
+                        <input type="text" id="origem2" class="dark-input border border-[#e3b341]/30" value="MIA" placeholder="Ex: MIA">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-[#e3b341] mb-2 uppercase font-bold">Destino 2 (Opcional)</label>
+                        <input type="text" id="destino2" class="dark-input border border-[#e3b341]/30" value="GRU" placeholder="Ex: GRU">
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4 pt-4 border-t border-[#1f2532]">
+                    <div class="md:col-span-4">
+                        <label class="block text-xs text-[#3fb950] mb-2 uppercase font-bold">Airlines Filter (Opcional)</label>
+                        <input type="text" id="airlines" class="dark-input border border-[#3fb950]/40" placeholder="Ex: AA, BA, Latam, Alaska (Separados por vírgula)">
+                    </div>
+                </div>
+            </div>
+
+            <hr class="border-[#1f2532] my-6">
+
+            <div class="flex flex-wrap items-center gap-2 mb-4">
+                <button onclick="adicionarLote([1, 2, 3])" class="text-xs bg-[#1f6feb] text-white px-3 py-2 rounded hover:bg-[#1a5cbf]">⚡ Próx 3 dias</button>
+                <button onclick="adicionarLote([7, 14, 21])" class="text-xs bg-[#8957e5] text-white px-3 py-2 rounded hover:bg-[#6e44b8]">📅 Semanais</button>
+
+                <div class="h-6 border-r border-[#1f2532] mx-2"></div>
+
+                <input type="date" id="data-avulsa" class="dark-input w-auto text-xs py-1.5 h-[32px]">
+                <button onclick="adicionarDataAvulsa()" class="text-xs bg-[#238636] text-white px-3 py-2 rounded hover:bg-[#2ea043] font-bold">➕ Add Data</button>
+
+                <button onclick="limparDatas()" class="text-xs bg-[#1f2532] text-red-400 border border-red-900/30 px-3 py-2 rounded ml-auto hover:bg-red-900/20">🗑️ Limpar</button>
+            </div>
+
+            <div id="lista-datas" class="flex flex-wrap gap-2 mb-4 bg-[#0b0f19] p-3 rounded border border-[#1f2532] min-h-[50px]"></div>
+
+            <div class="flex gap-2 mt-2">
+                <button onclick="rodar()" id="btnGo" class="w-full bg-[#238636] hover:bg-[#2ea043] text-white font-bold py-3 rounded shadow-lg uppercase transition">
+                    Gerar Matriz Executiva
+                </button>
+                <button onclick="exportarCSV()" id="btnExport" class="hidden px-6 bg-[#1f6feb] hover:bg-[#1a5cbf] text-white font-bold py-3 rounded shadow-lg uppercase transition flex items-center justify-center gap-2">
+                    <span>📊</span> Exportar CSV
+                </button>
+            </div>
+        </div>
+
+        <div id="log-terminal" class="hidden mt-6 bg-black border border-[#1f2532] p-3 rounded-lg text-green-400 font-mono text-xs h-32 overflow-y-auto">
+            > Inicializando...
+        </div>
+
+        <div id="saida" class="mt-8 hidden w-full"></div>
+    </div>
+
+    <script>
+        let modoAtual = 'hotel';
+        window.onload = () => { adicionarLote([1]); };
+
+        function mudarModo(modo) {
+            modoAtual = modo;
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById(`tab-${modo}`).classList.add('active');
+
+            if(modo === 'hotel') {
+                document.getElementById('container-hotel').classList.remove('hidden');
+                document.getElementById('container-voos').classList.add('hidden');
+            } else {
+                document.getElementById('container-hotel').classList.add('hidden');
+                document.getElementById('container-voos').classList.remove('hidden');
+            }
+        }
+
+        function adicionarLote(dias) {
+            const hoje = new Date();
+            dias.forEach(d => {
+                let dt = new Date(); dt.setDate(hoje.getDate() + d);
+                let val = dt.toISOString().split('T')[0];
+                if (!Array.from(document.querySelectorAll('#lista-datas input')).map(i=>i.value).includes(val)) {
+                    addDateTag(val);
+                }
+            });
+        }
+
+        function adicionarDataAvulsa() {
+            const val = document.getElementById('data-avulsa').value;
+            if(!val) return alert("Selecione uma data no calendário!");
+            if (!Array.from(document.querySelectorAll('#lista-datas input')).map(i=>i.value).includes(val)) {
+                addDateTag(val);
+            }
+        }
+
+        function addDateTag(val) {
+            const wrap = document.createElement('div'); wrap.className = 'relative group w-36';
+            wrap.innerHTML = `<input type="date" value="${val}" class="dark-input text-xs"><button onclick="this.parentElement.remove()" class="absolute -top-1 -right-1 bg-red-600 w-4 h-4 rounded-full text-xs text-white opacity-0 group-hover:opacity-100 transition cursor-pointer">×</button>`;
+            document.getElementById('lista-datas').appendChild(wrap);
+        }
+
+        function limparDatas() { document.getElementById('lista-datas').innerHTML = ''; }
+
+        async function rodar() {
+            const datas = Array.from(document.querySelectorAll('#lista-datas input')).map(i => i.value).filter(v => v);
+            if (!datas.length) return alert('Adicione datas na lista.');
+
+            const payload = {
+                modo: modoAtual,
+                datas: datas,
+                adultos: document.getElementById('adultos-hotel').value,
+                url: document.getElementById('url').value,
+                origem1: document.getElementById('origem1').value,
+                destino1: document.getElementById('destino1').value,
+                origem2: document.getElementById('origem2').value,
+                destino2: document.getElementById('destino2').value,
+                classe1: document.getElementById('classe1').value,
+                classe2: document.getElementById('classe2').value,
+                airlines: document.getElementById('airlines') ? document.getElementById('airlines').value : ""
+            };
+
+            document.getElementById('btnGo').disabled = true;
+            document.getElementById('btnExport').classList.add('hidden');
+            document.getElementById('saida').classList.add('hidden');
+
+            const terminal = document.getElementById('log-terminal');
+            terminal.classList.remove('hidden');
+            terminal.innerHTML = '> Solicitando dados ao servidor...<br>';
+
+            try {
+                const response = await fetch('http://127.0.0.1:5000/api/buscar_stream', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+
+                    const chunk = decoder.decode(value, { stream: true });
+                    const linhas = chunk.split('\n\n');
+
+                    for (let linha of linhas) {
+                        if (linha.startsWith('data: ')) {
+                            const obj = JSON.parse(linha.replace('data: ', ''));
+
+                            if (obj.status === 'info' || obj.status === 'error') {
+                                terminal.innerHTML += `> ${obj.msg}<br>`;
+                                terminal.scrollTop = terminal.scrollHeight;
+                            }
+                            else if (obj.status === 'done') {
+                                terminal.innerHTML += `> Finalizado! Montando matriz visual...<br>`;
+                                setTimeout(() => terminal.classList.add('hidden'), 2000);
+
+                                if (modoAtual === 'hotel') gerarTabelaHotel(obj.dados);
+                                else gerarMatrizVoos(obj.dados);
+
+                                document.getElementById('saida').classList.remove('hidden');
+                                document.getElementById('btnExport').classList.remove('hidden');
+                            }
+                        }
+                    }
+                }
+            } catch(e) {
+                terminal.innerHTML += `<span class="text-red-500">> Falha de Conexão: ${e.message}. Certifique-se de que o backend Python (app.py) está rodando na porta 5000.</span><br>`;
+            }
+
+            document.getElementById('btnGo').disabled = false;
+        }
+
+        // ==========================================
+        // GERAÇÃO DA MATRIZ DOS HOTÉIS
+        // ==========================================
+        function gerarTabelaHotel(dados) {
+            let todosItens = new Set();
+            dados.forEach(dia => { dia.itens.forEach(i => todosItens.add(JSON.stringify({nome: i.item, extra: i.extra}))); });
+            let listaBruta = Array.from(todosItens).map(JSON.parse);
+
+            if(listaBruta.length === 0) return document.getElementById('saida').innerHTML = '<div class="p-8 text-center text-gray-500 bg-[#0f1422]">Nenhum resultado de hotel encontrado.</div>';
+
+            const getTamanhoEmM2 = (item) => { const match = (item.nome + " " + item.extra).match(/(\d+)\s*m²/); return match ? parseInt(match[1], 10) : 0; };
+            const isPriority = (n, e) => /suite|suíte|first|penthouse/.test((n+e).toLowerCase()) ? 1 : 0;
+
+            listaBruta.sort((a, b) => {
+                if (getTamanhoEmM2(b) !== getTamanhoEmM2(a)) return getTamanhoEmM2(b) - getTamanhoEmM2(a);
+                if (isPriority(b.nome, b.extra) !== isPriority(a.nome, a.extra)) return isPriority(b.nome, b.extra) - isPriority(a.nome, a.extra);
+                return a.nome.localeCompare(b.nome);
+            });
+
+            let html = `<div class="overflow-x-auto rounded-lg"><table class="tabela-matriz bg-[#0b0f19]"><thead><tr><th class="head-fixa p-4 text-white font-bold text-xs uppercase border-b border-[#1f2532]">DATE</th>`;
+            listaBruta.forEach(c => {
+                let txtCor = isPriority(c.nome, c.extra) ? 'text-[#e3b341]' : 'text-[#58a6ff]';
+                html += `<th class="p-4 border-b border-[#1f2532]"><div class="text-sm font-semibold ${txtCor}">${c.nome}</div><span class="text-[10px] text-gray-500 mt-1 block">${c.extra}</span></th>`;
+            });
+            html += `</tr></thead><tbody>`;
+
+            dados.forEach(dia => {
+                let dFmt = `${dia.data.split('-')[2]}/${dia.data.split('-')[1]}`;
+                html += `<tr class="hover:bg-[#0f1422] transition"><td class="col-fixa p-4 text-sm font-bold text-white">${dFmt}</td>`;
+                listaBruta.forEach(col => {
+                    const item = dia.itens.find(q => q.item === col.nome);
+                    if (item) {
+                        let cls = item.sort_val < 3 ? "text-[#f85149]" : (item.sort_val < 9 ? "text-[#d29922]" : "text-[#3fb950]");
+                        html += `<td class="p-4"><div class="font-bold text-lg ${cls}">${item.qtd}</div><span class="text-[10px] text-gray-400 font-mono">${item.preco}</span></td>`;
+                    } else html += `<td class="p-4 text-gray-700 font-mono text-sm">-</td>`;
+                });
+                html += `</tr>`;
+            });
+            html += `</tbody></table></div>`;
+            document.getElementById('saida').innerHTML = html;
+        }
+
+        // ==========================================
+        // GERAÇÃO DA MATRIZ DOS VOOS
+        // ==========================================
+        function parseTime(timeStr) {
+            if (!timeStr || timeStr.includes('??') || timeStr === '--') return 9999;
+            let match = timeStr.match(/(\d+):(\d+)\s*(AM|PM)/i);
+            if (!match) return 9999;
+            let hours = parseInt(match[1], 10);
+            let minutes = parseInt(match[2], 10);
+            let modifier = match[3].toUpperCase();
+            if (hours === 12) hours = 0;
+            if (modifier === 'PM') hours += 12;
+            return hours * 60 + minutes;
+        }
+
+        window.toggleColuna = function(idx) {
+            const btn = document.getElementById(`btn-filtro-${idx}`);
+            const elementosDaColuna = document.querySelectorAll(`[data-col-id="flight-${idx}"]`);
+
+            if (btn.classList.contains('opacity-40')) {
+                btn.classList.remove('opacity-40', 'line-through');
+                btn.innerHTML = btn.innerHTML.replace('❌', '✔️');
+                elementosDaColuna.forEach(el => el.classList.remove('hidden'));
+            } else {
+                btn.classList.add('opacity-40', 'line-through');
+                btn.innerHTML = btn.innerHTML.replace('✔️', '❌');
+                elementosDaColuna.forEach(el => el.classList.add('hidden'));
+            }
+        };
+
+        function gerarMatrizVoos(dados) {
+            let voosUnicosMap = new Map();
+
+            dados.forEach(dia => {
+                if (dia.rotas) {
+                    dia.rotas.forEach(rotaObj => {
+                        rotaObj.voos.forEach(voo => {
+                            let key = `${rotaObj.rota_tag}|${voo.cia}|${voo.hora_ida}|${voo.hora_chegada}`;
+                            if (!voosUnicosMap.has(key)) {
+                                voosUnicosMap.set(key, {
+                                    id_trecho: rotaObj.id_trecho,
+                                    rota: rotaObj.rota_tag,
+                                    cia: voo.cia,
+                                    logo: voo.logo,
+                                    dep: voo.hora_ida,
+                                    arr: voo.hora_chegada,
+                                    duracao: voo.duracao || '--',
+                                    voo_num: voo.voo_num
+                                });
+                            }
+                        });
+                    });
+                }
+            });
+
+            let voosColunas = Array.from(voosUnicosMap.values());
+
+            if (voosColunas.length === 0) {
+                return document.getElementById('saida').innerHTML = '<div class="p-8 text-center text-gray-500 bg-[#0f1422] rounded-lg">Nenhum voo direto encontrado para os parâmetros informados.</div>';
+            }
+
+            voosColunas.sort((a, b) => {
+                if (a.id_trecho !== b.id_trecho) return a.id_trecho - b.id_trecho;
+                return parseTime(a.dep) - parseTime(b.dep);
+            });
+
+            let htmlFiltros = `
+            <div class="mb-4 p-4 bg-[#0f1422] border border-[#1f2532] rounded-lg">
+                <div class="text-xs text-gray-500 uppercase font-bold mb-3 flex items-center gap-2">
+                    <span>🎛️</span> Ocultar/Exibir Voos
+                </div>
+                <div class="flex flex-wrap gap-2">`;
+
+            voosColunas.forEach((col, index) => {
+                let corTrecho = col.id_trecho === 0 ? "bg-[#58a6ff]/10 text-[#58a6ff] border-[#58a6ff]/30" : "bg-[#e3b341]/10 text-[#e3b341] border-[#e3b341]/30";
+                htmlFiltros += `
+                    <button id="btn-filtro-${index}" onclick="toggleColuna(${index})" class="px-3 py-1.5 text-xs font-bold rounded border ${corTrecho} hover:bg-opacity-50 transition flex items-center gap-1 cursor-pointer">
+                        ✔️ ${col.cia} (${col.dep})
+                    </button>
+                `;
+            });
+            htmlFiltros += `</div></div>`;
+
+            let htmlTabela = `<div class="overflow-x-auto rounded-lg"><table class="tabela-matriz whitespace-nowrap text-sm bg-[#0b0f19]">`;
+
+            htmlTabela += `<thead>
+                        <tr>
+                            <th rowspan="2" class="head-fixa p-4 text-white font-bold text-xs tracking-wider uppercase border-b border-[#1f2532] align-bottom">DAY</th>`;
+
+            voosColunas.forEach((col, index) => {
+                let txtCor = col.id_trecho === 0 ? "text-[#58a6ff]" : "text-[#e3b341]";
+                let logoHtml = col.logo ? `<img src="${col.logo}" class="w-4 h-4 inline-block mr-1">` : `✈️ `;
+                let rotaCurta = col.rota.split(' | ')[0];
+                let numVooHtml = col.voo_num ? `<a href="https://www.google.com/search?q=${encodeURIComponent(col.cia + ' flight ' + col.voo_num)}" target="_blank" title="Validar no Google" class="text-[#58a6ff] hover:text-white transition underline text-[10px] ml-1.5 font-mono cursor-pointer">#${col.voo_num}</a>` : '';
+
+                htmlTabela += `
+                    <th colspan="2" data-col-id="flight-${index}" class="p-4 border-b border-[#1f2532] font-normal">
+                        <div class="flex flex-col items-center gap-2">
+                            <span class="${txtCor} text-[10px] font-bold tracking-widest uppercase bg-[#1f2532]/50 px-3 py-1 rounded-full">${rotaCurta}</span>
+                            <span class="text-white font-semibold text-xs flex items-center justify-center">${logoHtml} ${col.cia} ${numVooHtml}</span>
+                            <span class="text-gray-400 text-xs">${col.dep} <span class="mx-1">➔</span> ${col.arr}</span>
+                            <span class="text-gray-500 text-[10px] flex items-center">⏱️ ${col.duracao}</span>
+                        </div>
+                    </th>
+                `;
+            });
+            htmlTabela += `</tr><tr>`;
+
+            voosColunas.forEach((col, index) => {
+                htmlTabela += `<th data-col-id="flight-${index}" class="p-2 text-[10px] text-gray-500 uppercase font-semibold border-b border-[#1f2532]">Price per unity</th>
+                               <th data-col-id="flight-${index}" class="p-2 text-[10px] text-gray-500 uppercase font-semibold border-b border-[#1f2532]">Seat</th>`;
+            });
+            htmlTabela += `</tr></thead><tbody>`;
+
+            dados.forEach(dia => {
+                let dt = new Date(dia.data + 'T00:00:00');
+                let diaFmt = dt.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: '2-digit' }).replace(/ /g, '-');
+
+                htmlTabela += `<tr class="hover:bg-[#0f1422] transition"><td class="col-fixa p-4 font-bold text-white text-sm whitespace-nowrap">${diaFmt}</td>`;
+
+                voosColunas.forEach((col, index) => {
+                    let vooEncontrado = null;
+
+                    if (dia.rotas) {
+                        let rotaCerta = dia.rotas.find(r => r.id_trecho === col.id_trecho);
+                        if (rotaCerta) {
+                            vooEncontrado = rotaCerta.voos.find(v => v.cia === col.cia && v.hora_ida === col.dep && v.hora_chegada === col.arr);
+                        }
+                    }
+
+                    if (vooEncontrado) {
+                        let seatClass = "text-[#3fb950]";
+                        let seatText = "≥ 9";
+                        if (vooEncontrado.sort_val < 9) {
+                            seatClass = vooEncontrado.sort_val <= 3 ? "text-[#f85149]" : "text-[#d29922]";
+                            seatText = vooEncontrado.qtd;
+                        }
+
+                        htmlTabela += `<td data-col-id="flight-${index}" class="p-4 text-gray-300 font-mono text-sm">${vooEncontrado.preco}</td>
+                                       <td data-col-id="flight-${index}" class="p-4 font-bold ${seatClass} text-sm">${seatText}</td>`;
+                    } else {
+                        htmlTabela += `<td data-col-id="flight-${index}" class="p-4 text-gray-700 font-mono text-sm">-</td>
+                                       <td data-col-id="flight-${index}" class="p-4 text-gray-700 font-mono text-sm">-</td>`;
+                    }
+                });
+
+                htmlTabela += `</tr>`;
+            });
+
+            htmlTabela += `</tbody></table></div>`;
+            document.getElementById('saida').innerHTML = htmlFiltros + htmlTabela;
+        }
+
+        // ==========================================
+        // EXPORTAR PARA CSV
+        // ==========================================
+        function exportarCSV() {
+            let tabela = document.querySelector('.tabela-matriz');
+            if (!tabela) return alert("Não há dados para exportar.");
+
+            let csv = [];
+            let linhas = tabela.querySelectorAll('tr');
+
+            for (let i = 0; i < linhas.length; i++) {
+                let linha = [], cols = linhas[i].querySelectorAll('td:not(.hidden), th:not(.hidden)');
+                for (let j = 0; j < cols.length; j++) {
+                    let texto = cols[j].innerText.replace(/(\r\n|\n|\r)/gm, " ").trim();
+                    linha.push('"' + texto + '"');
+                }
+                csv.push(linha.join(','));
+            }
+
+            let csvContent = "data:text/csv;charset=utf-8," + csv.join("\n");
+            let encodedUri = encodeURI(csvContent);
+            let link = document.createElement("a");
+            link.setAttribute("href", encodedUri);
+            link.setAttribute("download", "Matriz_Executiva.csv");
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+    </script>
+</body>
+</html>
